@@ -20,12 +20,15 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -34,10 +37,13 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.map.MapManager
+import com.example.plane_tracker.ui.AirportBoardSheet
+import com.example.plane_tracker.ui.EmergencyBanner
 import com.example.plane_tracker.ui.FlightDetailsPanel
 import com.example.plane_tracker.ui.FilterSheet
 import com.example.plane_tracker.ui.FollowingChip
 import com.example.plane_tracker.ui.MapControls
+import com.example.plane_tracker.ui.RadarOverlay
 import com.example.plane_tracker.ui.SearchOverlay
 import com.example.plane_tracker.ui.StatusChip
 import com.example.plane_tracker.ui.theme.PlaneTrackerTheme
@@ -66,6 +72,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
     val mapManager = remember { MapManager(context) }
     var filtersOpen by remember { mutableStateOf(false) }
     var is3D by remember { mutableStateOf(false) }
+    var radarIndex by remember { mutableIntStateOf(0) }
 
     val uiState by viewModel.uiState.collectAsState()
 
@@ -99,6 +106,18 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         mapManager.setLabelsVisible(uiState.filters.showLabels)
     }
 
+    // Apply camera padding so selected aircraft center in open map space above details card
+    val density = LocalDensity.current
+    LaunchedEffect(uiState.selected != null, uiState.isFollowing) {
+        if (uiState.selected != null && !uiState.isFollowing) {
+            val topPx = with(density) { 90.dp.roundToPx() }
+            val bottomPx = with(density) { 360.dp.roundToPx() }
+            mapManager.setPadding(0, topPx, 0, bottomPx)
+        } else {
+            mapManager.setPadding(0, 0, 0, 0)
+        }
+    }
+
     // Lifecycle forwarding
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -129,6 +148,17 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 .statusBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
+            // Emergency squawk alerts (7700/7600/7500)
+            EmergencyBanner(
+                emergencies = uiState.emergencies,
+                onSelect = { e ->
+                    mapManager.flyTo(e.latitude, e.longitude, 9.5)
+                    viewModel.selectAircraft(e.hex)
+                },
+                onDismiss = viewModel::dismissEmergency,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+
             SearchOverlay(
                 query = uiState.searchQuery,
                 aircraftResults = uiState.searchResults,
@@ -145,6 +175,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 },
                 onAirportClick = { ap ->
                     mapManager.flyTo(ap.lat, ap.lon, 9.0)
+                    viewModel.openAirportBoard(ap)
                     viewModel.updateSearch("")
                 }
             )
@@ -168,6 +199,44 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            RadarOverlay(
+                radarOn = uiState.radarOn,
+                radarPlaying = uiState.radarPlaying,
+                frames = uiState.radarFrames,
+                currentIndex = radarIndex,
+                onTogglePlay = viewModel::toggleRadarPlaying
+            )
+        }
+
+        // Rain radar: keep the map's raster frame in sync with the UI timeline
+        LaunchedEffect(uiState.radarFrames, radarIndex, uiState.radarOn) {
+            (uiState.radarFrames.getOrNull(radarIndex) ?: uiState.radarFrames.lastOrNull())?.let { frame ->
+                mapManager.updateRadarFrame(frame, visible = uiState.radarOn)
+            }
+        }
+        LaunchedEffect(uiState.radarOn, uiState.radarFrames) {
+            mapManager.setRadarVisible(uiState.radarOn)
+            if (uiState.radarOn && uiState.radarFrames.isNotEmpty()) {
+                radarIndex = uiState.radarFrames.lastIndex
+            }
+        }
+        // Animate the radar timeline when playing
+        LaunchedEffect(uiState.radarOn, uiState.radarPlaying, uiState.radarFrames.size) {
+            if (!uiState.radarOn || !uiState.radarPlaying || uiState.radarFrames.isEmpty()) {
+                return@LaunchedEffect
+            }
+            while (true) {
+                radarIndex = (radarIndex + 1) % uiState.radarFrames.size
+                delay(700)
+            }
+        }
+
+        // Push emergency positions to their map pulse layer
+        LaunchedEffect(uiState.emergencies) {
+            mapManager.updateEmergencies(uiState.emergencies)
         }
 
         // Right-side controls
@@ -175,29 +244,33 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             airportsOn = uiState.filters.showAirports,
             labelsOn = uiState.filters.showLabels,
             is3D = is3D,
+            radarOn = uiState.radarOn,
             onZoomIn = { mapManager.zoomBy(+1.5) },
             onZoomOut = { mapManager.zoomBy(-1.5) },
             onCenter = mapManager::centerOnDefault,
             onToggle3D = { mapManager.toggle2D3D(uiState.selected?.aircraft?.heading) },
             onToggleAirports = viewModel::toggleAirports,
             onToggleLabels = viewModel::toggleLabels,
+            onToggleRadar = viewModel::toggleRadar,
             onOpenFilters = { filtersOpen = true },
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 12.dp)
         )
 
-        // Bottom: flight details
-        uiState.selected?.let { selected ->
-            FlightDetailsPanel(
-                selected = selected,
-                routeProgress = uiState.routeProgress,
-                isLoading = uiState.isLoadingDetails,
-                isFollowing = uiState.isFollowing,
-                onClose = viewModel::clearSelection,
-                onToggleFollow = viewModel::toggleFollow,
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
+        // Bottom: flight details (hidden when follow mode is active)
+        if (!uiState.isFollowing) {
+            uiState.selected?.let { selected ->
+                FlightDetailsPanel(
+                    selected = selected,
+                    routeProgress = uiState.routeProgress,
+                    isLoading = uiState.isLoadingDetails,
+                    isFollowing = uiState.isFollowing,
+                    onClose = viewModel::clearSelection,
+                    onToggleFollow = viewModel::toggleFollow,
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
+            }
         }
 
         // Filter bottom sheet
@@ -206,6 +279,21 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             filters = uiState.filters,
             onChange = viewModel::setFilters,
             onDismiss = { filtersOpen = false }
+        )
+
+        // Airport arrivals/departures board
+        AirportBoardSheet(
+            airport = uiState.boardAirport,
+            board = uiState.board,
+            loading = uiState.boardLoading,
+            onSelectAircraft = { ac ->
+                viewModel.closeAirportBoard()
+                viewModel.focusSearchResult(
+                    ac,
+                    onFocused = { lat, lon -> mapManager.flyTo(lat, lon, 11.0) }
+                )
+            },
+            onClose = viewModel::closeAirportBoard
         )
     }
 }

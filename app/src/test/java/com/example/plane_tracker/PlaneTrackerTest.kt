@@ -4,7 +4,12 @@ import com.example.plane_tracker.data.Aircraft
 import com.example.plane_tracker.data.Airport
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.AltitudeColors
+import com.example.plane_tracker.data.AirportBoardBuilder
+import com.example.plane_tracker.data.BoardKind
+import com.example.plane_tracker.data.EmergencyDetector
+import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.parseOpenSkyState
+import com.example.plane_tracker.data.parseRadarMapsJson
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgressCalculator
 import com.example.plane_tracker.util.calculateClockETA
@@ -163,11 +168,13 @@ class RouteProgressTest {
     }
 
     @Test
-    fun `grounded or slow aircraft has no eta`() {
+    fun `grounded or slow or NaN speed aircraft has no eta`() {
         val grounded = aircraftAt(51.4700, -0.4543).copy(onGround = true)
         assertNull(RouteProgressCalculator.compute(grounded, origin, destination)?.etaMinutes)
         val slow = aircraftAt(51.4700, -0.4543, speedMps = 5.0)
         assertNull(RouteProgressCalculator.compute(slow, origin, destination)?.etaMinutes)
+        val nanSpeed = aircraftAt(51.4700, -0.4543, speedMps = Double.NaN)
+        assertNull(RouteProgressCalculator.compute(nanSpeed, origin, destination)?.etaMinutes)
     }
 
     @Test
@@ -211,5 +218,126 @@ class AircraftClimbRateTest {
 
         val climbing = wobble.copy(verticalRateMps = 8.0)
         assertTrue(climbing.climbFpm >= -300)
+    }
+}
+
+class EmergencyDetectorTest {
+
+    private fun ac(squawk: String?, hex: String = "hex1") = Aircraft(
+        icao24 = hex, callsign = "TEST", longitude = -0.5, latitude = 53.5,
+        heading = 0f, altitudeMeters = 9000.0, velocityMps = 200.0,
+        verticalRateMps = 0.0, onGround = false, squawk = squawk
+    )
+
+    @Test
+    fun `identifies all three emergency squawks`() {
+        val events = EmergencyDetector.identify(
+            listOf(ac("7700"), ac("7600", "hex2"), ac("7500", "hex3"))
+        )
+        assertEquals(3, events.size)
+        assertEquals("General emergency", events[0].label)
+        assertEquals("Radio failure", events[1].label)
+        assertEquals("Hijack", events[2].label)
+    }
+
+    @Test
+    fun `normal squawks are ignored`() {
+        val events = EmergencyDetector.identify(
+            listOf(ac("7700"), ac("1000", "h2"), ac("2000", "h3"), ac("7705", "h4"), ac(null, "h5")))
+        assertEquals(1, events.size)
+    }
+
+    @Test
+    fun `callsign falls back to hex when blank`() {
+        val blank = ac("7700").copy(callsign = "")
+        val events = EmergencyDetector.identify(listOf(blank))
+        assertEquals("HEX1", events[0].callsign)
+    }
+}
+
+class AirportBoardBuilderTest {
+
+    private val ams = 52.3105 to 4.7683 // Amsterdam Schiphol
+
+    private fun plane(lat: Double, lon: Double, callsign: String, speedMps: Double = 200.0) = Aircraft(
+        icao24 = callsign.lowercase(), callsign = callsign, longitude = lon, latitude = lat,
+        heading = 90f, altitudeMeters = 9000.0, velocityMps = speedMps,
+        verticalRateMps = 0.0, onGround = false
+    )
+
+    private fun route(originIata: String?, destIata: String?) = RouteInfo(
+        callsign = "TST1",
+        airlineName = "Test Air",
+        airlineIata = "TE",
+        origin = originIata?.let { Airport("Origin", it, null, 51.0, 0.0) },
+        destination = destIata?.let { Airport("Dest", it, null, 48.0, 2.0) }
+    )
+
+    @Test
+    fun `classifies arrivals and departures by route endpoints`() {
+        val routes = mapOf(
+            "ARR1" to route("LHR", "AMS"),
+            "DEP1" to route("AMS", "DXB"),
+            "OTH1" to route("LHR", "DXB")
+        )
+        val board = AirportBoardBuilder.build(
+            "AMS", ams.first, ams.second,
+            listOf(plane(52.0, 4.5, "ARR1"), plane(52.5, 5.0, "DEP1"), plane(52.2, 4.2, "OTH1")),
+            routes
+        )
+        assertEquals(1, board.arrivals.size)
+        assertEquals(1, board.departures.size)
+        assertEquals("ARR1", board.arrivals[0].aircraft.callsign)
+        assertEquals("DEP1", board.departures[0].aircraft.callsign)
+    }
+
+    @Test
+    fun `candidates are capped sorted by distance and airborne only`() {
+        val grounded = plane(52.31, 4.77, "GND1").copy(onGround = true)
+        val far = plane(49.5, 0.5, "FAR1") // ~433 km, beyond the 400 km radius
+        val near = plane(52.2, 4.7, "NEAR1")
+        val candidates = AirportBoardBuilder.candidateCallsigns(ams.first, ams.second, listOf(grounded, far, near))
+        assertEquals(listOf("NEAR1"), candidates)
+    }
+
+    @Test
+    fun `eta is derived from ground speed for arrivals and null for departures`() {
+        val routes = mapOf(
+            "ETA1" to route("LHR", "AMS"),
+            "DEP1" to route("AMS", "DXB")
+        )
+        // ~98 km away at 200 m/s (720 km/h) -> ~8 minutes
+        val board = AirportBoardBuilder.build(
+            "ams", ams.first, ams.second,
+            listOf(plane(51.5, 4.2, "ETA1  "), plane(52.2, 4.7, "DEP1")),
+            routes
+        )
+        val arrival = board.arrivals[0]
+        assertEquals(8, arrival.etaMinutes)
+        val departure = board.departures[0]
+        assertNull(departure.etaMinutes)
+    }
+}
+
+class RadarParserTest {
+
+    @Test
+    fun `parses past radar frames into tile urls`() {
+        val json = """{"host":"https://tilecache.rainviewer.com","radar":{"past":[
+            {"time":1790191800,"path":"/v2/radar/aaa"},
+            {"time":1790192400,"path":"/v2/radar/bbb"}
+        ]}}"""
+        val frames = parseRadarMapsJson(json)
+        assertEquals(2, frames.size)
+        assertEquals(1790191800000L, frames[0].timeMs)
+        assertEquals(
+            "https://tilecache.rainviewer.com/v2/radar/aaa/256/{z}/{x}/{y}/2/1_1.png",
+            frames[0].tileUrl
+        )
+    }
+
+    @Test
+    fun `malformed json yields empty list`() {
+        assertTrue(parseRadarMapsJson("not json").isEmpty())
     }
 }

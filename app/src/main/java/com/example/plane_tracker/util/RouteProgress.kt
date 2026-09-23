@@ -11,7 +11,7 @@ data class RouteProgress(
     /** 0..1 clamped fraction of the route completed. */
     val fraction: Float,
     /** Estimated minutes to arrival at current ground speed; null when not computable. */
-    val etaMinutes: Int?
+    val etaMinutes: Int?,
 )
 
 /**
@@ -35,12 +35,14 @@ object RouteProgressCalculator {
         val flownM = GeoMath.distanceMeters(oLat, oLon, aircraft.latitude, aircraft.longitude)
         val remainingM = GeoMath.distanceMeters(aircraft.latitude, aircraft.longitude, dLat, dLon)
 
-        val fraction = (flownM / totalM).toFloat().coerceIn(0f, 1f)
+        val rawFraction = (flownM / totalM).toFloat()
+        val fraction = if (rawFraction.isNaN()) 0f else rawFraction.coerceIn(0f, 1f)
 
-        val etaMinutes = if (aircraft.onGround || aircraft.velocityMps < 20.0) {
-            null // parked or too slow for a meaningful estimate
+        val speed = aircraft.velocityMps
+        val etaMinutes = if (aircraft.onGround || speed.isNaN() || speed < 20.0) {
+            null // parked or too slow or invalid for a meaningful estimate
         } else {
-            ((remainingM / aircraft.velocityMps) / 60.0).toInt()
+            ((remainingM / speed) / 60.0).toInt()
         }
 
         return RouteProgress(
@@ -48,7 +50,8 @@ object RouteProgressCalculator {
             flownKm = flownM / 1000.0,
             remainingKm = remainingM / 1000.0,
             fraction = fraction,
-            etaMinutes = etaMinutes
+            etaMinutes = etaMinutes,
         )
     }
 }
+

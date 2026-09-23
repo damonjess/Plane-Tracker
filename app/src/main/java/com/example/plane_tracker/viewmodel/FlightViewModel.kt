@@ -4,10 +4,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.plane_tracker.data.Aircraft
 import com.example.plane_tracker.data.Airports
+import com.example.plane_tracker.data.AirportBoard
+import com.example.plane_tracker.data.AirportBoardBuilder
+import com.example.plane_tracker.data.EmergencyDetector
+import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.data.FlightRepository
 import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.data.MapFrame
+import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.RouteProgressCalculator
 import kotlinx.coroutines.delay
@@ -42,7 +47,17 @@ data class TrackerUiState(
     val isFollowing: Boolean = false,
     val isLoadingDetails: Boolean = false,
     val searchQuery: String = "",
-    val searchResults: List<Aircraft> = emptyList()
+    val searchResults: List<Aircraft> = emptyList(),
+    /** Live emergency-squawk events (7700/7600/7500), minus dismissed ones. */
+    val emergencies: List<EmergencyEvent> = emptyList(),
+    /** Rain radar overlay state. */
+    val radarOn: Boolean = false,
+    val radarPlaying: Boolean = true,
+    val radarFrames: List<RadarFrame> = emptyList(),
+    /** Airport arrivals/departures board. */
+    val boardAirport: Airports.Entry? = null,
+    val board: AirportBoard? = null,
+    val boardLoading: Boolean = false
 )
 
 class FlightViewModel : ViewModel() {
@@ -51,6 +66,7 @@ class FlightViewModel : ViewModel() {
         private const val FLEET_POLL_MS = 10_000L
         private const val FRAME_TICK_MS = 200L
         private const val HISTORY_KEEP_MS = 15 * 60_000L
+        private const val RADAR_POLL_MS = 10 * 60_000L
     }
 
     private val repository = FlightRepository()
@@ -68,9 +84,13 @@ class FlightViewModel : ViewModel() {
     var onAutoTiltTo3D: ((Double, Double, Float) -> Unit)? = null
     private var lastSelectedWasDescending = false
 
+    private val dismissedEmergencyHexes = mutableSetOf<String>()
+    private var openBoardAirport: Airports.Entry? = null
+
     init {
         startPolling()
         startFrameTicker()
+        startRadarPolling()
     }
 
     private fun emptyCollection() = FeatureCollection.fromFeatures(emptyList<Feature>())
@@ -82,15 +102,37 @@ class FlightViewModel : ViewModel() {
                 try {
                     engine.mergeFleet(repository.fetchFleet())
                     val state = engine.lastFleetState
+                    // Recompute emergency squawks from the fresh snapshot.
+                    val emergencies = EmergencyDetector.identify(state?.aircraft ?: emptyList())
+                    // Forgive dismissals once the event is gone so a new squawk alerts again.
+                    dismissedEmergencyHexes.removeAll { hex -> emergencies.none { it.hex == hex } }
                     _uiState.value = _uiState.value.copy(
                         aircraftCount = state?.aircraft?.size ?: 0,
                         source = state?.source ?: "offline",
-                        lastUpdateMs = state?.fetchedAt ?: 0L
+                        lastUpdateMs = state?.fetchedAt ?: 0L,
+                        emergencies = emergencies.filter { it.hex !in dismissedEmergencyHexes }
                     )
                 } catch (e: Exception) {
                     _uiState.value = _uiState.value.copy(source = "offline")
                 }
                 delay(FLEET_POLL_MS)
+            }
+        }
+    }
+
+    /** Background loop: refreshes RainViewer radar frames every 10 minutes. */
+    private fun startRadarPolling() {
+        viewModelScope.launch {
+            while (true) {
+                try {
+                    val frames = repository.fetchRadarFrames()
+                    if (frames.isNotEmpty()) {
+                        _uiState.value = _uiState.value.copy(radarFrames = frames)
+                    }
+                } catch (_: Exception) {
+                    // Radar is best-effort; keep the old frames.
+                }
+                delay(RADAR_POLL_MS)
             }
         }
     }
@@ -262,6 +304,64 @@ class FlightViewModel : ViewModel() {
     fun toggleAirports() = updateFilters { it.copy(showAirports = !it.showAirports) }
 
     fun toggleLabels() = updateFilters { it.copy(showLabels = !it.showLabels) }
+
+    /** Hides an emergency banner; it returns if the aircraft squawks again later. */
+    fun dismissEmergency(hex: String) {
+        dismissedEmergencyHexes.add(hex)
+        _uiState.value = _uiState.value.copy(
+            emergencies = _uiState.value.emergencies.filter { it.hex != hex }
+        )
+    }
+
+    fun toggleRadar() {
+        _uiState.value = _uiState.value.copy(radarOn = !_uiState.value.radarOn)
+    }
+
+    fun toggleRadarPlaying() {
+        _uiState.value = _uiState.value.copy(radarPlaying = !_uiState.value.radarPlaying)
+    }
+
+    /** Opens the arrivals/departures board for an airport, resolving routes live. */
+    fun openAirportBoard(entry: Airports.Entry) {
+        openBoardAirport = entry
+        _uiState.value = _uiState.value.copy(
+            boardAirport = entry, board = null, boardLoading = true
+        )
+        viewModelScope.launch {
+            try {
+                val aircraft = engine.allAircraft(System.currentTimeMillis())
+                val candidates = AirportBoardBuilder.candidateCallsigns(entry.lat, entry.lon, aircraft)
+                val routes = candidates.associateWith { cs ->
+                    try {
+                        repository.fetchRoute(cs)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                val board = AirportBoardBuilder.build(
+                    entry.iata, entry.lat, entry.lon, aircraft, routes
+                )
+                // Only apply if this airport is still the open one.
+                if (openBoardAirport == entry) {
+                    _uiState.value = _uiState.value.copy(board = board, boardLoading = false)
+                }
+            } catch (_: Exception) {
+                if (openBoardAirport == entry) {
+                    _uiState.value = _uiState.value.copy(
+                        board = AirportBoard(entry.iata, emptyList(), emptyList()),
+                        boardLoading = false
+                    )
+                }
+            }
+        }
+    }
+
+    fun closeAirportBoard() {
+        openBoardAirport = null
+        _uiState.value = _uiState.value.copy(
+            boardAirport = null, board = null, boardLoading = false
+        )
+    }
 
     fun applyFiltersToMap(map: com.example.plane_tracker.map.MapManager) {
         val f = _uiState.value.filters

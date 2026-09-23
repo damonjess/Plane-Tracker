@@ -85,8 +85,9 @@ class FlightRepository {
 
     /** Resolves airline and origin/destination airports via adsbdb. */
     suspend fun fetchRoute(callsign: String): RouteInfo? = withContext(Dispatchers.IO) {
-        if (callsign.isBlank()) return@withContext null
-        val body = getBody("https://api.adsbdb.com/v0/callsign/$callsign")
+        val cs = callsign.trim()
+        if (cs.isBlank()) return@withContext null
+        val body = getBody("https://api.adsbdb.com/v0/callsign/$cs")
             ?: return@withContext null
         val response = JSONObject(body).optJSONObject("response") ?: return@withContext null
         val routeJson = response.optJSONObject("flightroute") ?: return@withContext null
@@ -113,7 +114,7 @@ class FlightRepository {
         }
 
         RouteInfo(
-            callsign = callsign,
+            callsign = cs,
             airlineName = routeJson.optJSONObject("airline")?.optStringOrNull("name"),
             airlineIata = routeJson.optJSONObject("airline")?.optStringOrNull("iata"),
             origin = airport("origin"),

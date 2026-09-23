@@ -8,7 +8,7 @@ data class EmergencyEvent(
     val label: String,
     val latitude: Double,
     val longitude: Double,
-    val atMs: Long = System.currentTimeMillis()
+    val atMs: Long = System.currentTimeMillis(),
 )
 
 /** Detects the three ICAO emergency squawks in the live fleet. */
@@ -16,20 +16,26 @@ object EmergencyDetector {
     val SQUAWKS: Map<String, String> = mapOf(
         "7500" to "Hijack",
         "7600" to "Radio failure",
-        "7700" to "General emergency"
+        "7700" to "General emergency",
     )
 
-    fun isEmergency(squawk: String?): Boolean = squawk != null && SQUAWKS.containsKey(squawk)
+    fun isEmergency(squawk: String?): Boolean {
+        val sq = squawk?.trim() ?: return false
+        return SQUAWKS.containsKey(sq)
+    }
 
     fun identify(aircraft: List<Aircraft>): List<EmergencyEvent> =
-        aircraft.filter { isEmergency(it.squawk) }.map { ac ->
+        aircraft.mapNotNull { ac ->
+            val sq = ac.squawk?.trim() ?: return@mapNotNull null
+            val label = SQUAWKS[sq] ?: return@mapNotNull null
             EmergencyEvent(
                 hex = ac.icao24,
-                callsign = ac.callsign.ifEmpty { ac.icao24.uppercase() },
-                squawk = ac.squawk!!,
-                label = SQUAWKS[ac.squawk!!] ?: "Emergency",
+                callsign = ac.callsign.trim().ifEmpty { ac.icao24.uppercase() },
+                squawk = sq,
+                label = label,
                 latitude = ac.latitude,
-                longitude = ac.longitude
+                longitude = ac.longitude,
             )
         }
 }
+

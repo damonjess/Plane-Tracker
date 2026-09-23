@@ -12,14 +12,14 @@ data class BoardEntry(
     val distanceKm: Int,
     val etaMinutes: Int?,
     val airlineName: String?,
-    val routeLabel: String?
+    val routeLabel: String?,
 )
 
 /** Computed arrivals/departures boards for one airport. */
 data class AirportBoard(
     val iata: String,
     val departures: List<BoardEntry>,
-    val arrivals: List<BoardEntry>
+    val arrivals: List<BoardEntry>,
 ) {
     val total: Int get() = departures.size + arrivals.size
 }
@@ -39,14 +39,14 @@ object AirportBoardBuilder {
         airportLat: Double,
         airportLon: Double,
         aircraft: List<Aircraft>,
-        max: Int = 30
+        max: Int = 30,
     ): List<String> = aircraft.asSequence()
         .filter { !it.onGround && it.callsign.isNotBlank() }
-        .map { it to GeoMath.distanceMeters(airportLat, airportLon, it.latitude, it.longitude) / 1000.0 }
+        .map { it to (GeoMath.distanceMeters(airportLat, airportLon, it.latitude, it.longitude) / 1000.0) }
         .filter { it.second <= MAX_RADIUS_KM }
         .sortedBy { it.second }
         .take(max)
-        .map { it.first.callsign.uppercase() }
+        .map { it.first.callsign.trim().uppercase() }
         .distinct()
         .toList()
 
@@ -55,20 +55,24 @@ object AirportBoardBuilder {
         airportLat: Double,
         airportLon: Double,
         aircraft: List<Aircraft>,
-        routesByCallsign: Map<String, RouteInfo?>
+        routesByCallsign: Map<String, RouteInfo?>,
     ): AirportBoard {
         val entries = mutableListOf<BoardEntry>()
+        val targetIata = airportIata.trim().uppercase()
         for (ac in aircraft) {
             if (ac.onGround) continue
-            val route = routesByCallsign[ac.callsign.uppercase()] ?: continue
+            val cs = ac.callsign.trim().uppercase()
+            val route = routesByCallsign[cs] ?: continue
             val distKm = GeoMath.distanceMeters(airportLat, airportLon, ac.latitude, ac.longitude) / 1000.0
             if (distKm > MAX_RADIUS_KM) continue
+            val destIata = route.destination?.iata?.trim()?.uppercase()
+            val origIata = route.origin?.iata?.trim()?.uppercase()
             val kind = when {
-                route.destination?.iata == airportIata -> BoardKind.ARRIVAL
-                route.origin?.iata == airportIata -> BoardKind.DEPARTURE
+                destIata == targetIata -> BoardKind.ARRIVAL
+                origIata == targetIata -> BoardKind.DEPARTURE
                 else -> continue
             }
-            val eta = if (ac.velocityMps > 5.0) {
+            val eta = if (kind == BoardKind.ARRIVAL && ac.velocityMps > 5.0 && !ac.velocityMps.isNaN()) {
                 (distKm / (ac.velocityMps * 3.6) * 60.0).roundToInt()
             } else null
             entries += BoardEntry(
@@ -77,7 +81,7 @@ object AirportBoardBuilder {
                 distanceKm = distKm.roundToInt(),
                 etaMinutes = eta,
                 airlineName = route.airlineName,
-                routeLabel = route.routeLabel
+                routeLabel = route.routeLabel,
             )
         }
         val sorted = entries.sortedWith(
@@ -86,7 +90,8 @@ object AirportBoardBuilder {
         return AirportBoard(
             airportIata,
             sorted.filter { it.kind == BoardKind.DEPARTURE },
-            sorted.filter { it.kind == BoardKind.ARRIVAL }
+            sorted.filter { it.kind == BoardKind.ARRIVAL },
         )
     }
 }
+

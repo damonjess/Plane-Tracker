@@ -10,7 +10,9 @@ import android.os.Looper
 import androidx.core.graphics.ColorUtils
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.AltitudeColors
+import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.MapFrame
+import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.util.GeoMath
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
@@ -24,8 +26,11 @@ import org.maplibre.android.style.layers.CircleLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
+import org.maplibre.android.style.layers.RasterLayer
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.android.style.sources.RasterSource
+import org.maplibre.android.style.sources.TileSet
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
@@ -59,6 +64,8 @@ class MapManager(context: Context) {
     private lateinit var selectedSource: GeoJsonSource
     private lateinit var trailSource: GeoJsonSource
     private lateinit var courseSource: GeoJsonSource
+    private lateinit var emergencySource: GeoJsonSource
+    private var radarUrl: String? = null
 
     private var planeLayerIds: List<String> = emptyList()
 
@@ -120,6 +127,8 @@ class MapManager(context: Context) {
         style.addSource(trailSource)
         style.addSource(selectedSource)
         style.addSource(airportsSource)
+        emergencySource = GeoJsonSource("emergency-source")
+        style.addSource(emergencySource)
 
         // --- Airport layers (bottom of stack, hidden by default) ---
         style.addLayer(
@@ -185,6 +194,24 @@ class MapManager(context: Context) {
                     ),
                     PropertyFactory.circleStrokeColor("#ffffff"),
                     PropertyFactory.circleStrokeWidth(2.0f)
+                )
+        )
+
+        // --- Emergency squawk pulse ring (below plane icons) ---
+        style.addLayer(
+            CircleLayer("emergency-pulse", "emergency-source")
+                .withProperties(
+                    PropertyFactory.circleColor("#ff2e2e"),
+                    PropertyFactory.circleOpacity(0.30f),
+                    PropertyFactory.circleRadius(
+                        Expression.interpolate(
+                            Expression.linear(), Expression.zoom(),
+                            Expression.stop(4.0, 9.0f), Expression.stop(10.0, 22.0f)
+                        )
+                    ),
+                    PropertyFactory.circleStrokeColor("#ff5252"),
+                    PropertyFactory.circleStrokeWidth(2.0f),
+                    PropertyFactory.circleStrokeOpacity(0.9f)
                 )
         )
 
@@ -318,6 +345,69 @@ class MapManager(context: Context) {
     fun setAirportsVisible(visible: Boolean) {
         setLayerVisible("airports-circle", visible)
         setLayerVisible("airport-labels", visible)
+    }
+
+    @Suppress("DEPRECATION")
+    fun setPadding(leftPx: Int = 0, topPx: Int = 0, rightPx: Int = 0, bottomPx: Int = 0) {
+        requireMain {
+            map?.setPadding(leftPx, topPx, rightPx, bottomPx)
+        }
+    }
+
+    /** Pushes emergency-squawk aircraft onto the map as pulsing red rings. */
+    fun updateEmergencies(events: List<EmergencyEvent>) {
+        requireMain {
+            if (!styleReady) return@requireMain
+            emergencySource.setGeoJson(
+                FeatureCollection.fromFeatures(
+                    events.map { e ->
+                        val f = Feature.fromGeometry(Point.fromLngLat(e.longitude, e.latitude))
+                        f.addStringProperty("hex", e.hex)
+                        f
+                    }
+                )
+            )
+        }
+    }
+
+    /**
+     * Swaps the radar overlay to a RainViewer tile URL. The raster source is
+     * rebuilt because RainViewer tile paths change every frame; the layer keeps
+     * its position at the bottom of the stack (above basemap, below planes).
+     */
+    fun updateRadarFrame(frame: RadarFrame?, visible: Boolean) {
+        requireMain {
+            val style = map?.style ?: return@requireMain
+            if (frame == null) return@requireMain
+            if (frame.tileUrl == radarUrl && style.getLayer("radar-layer") != null) {
+                setRadarVisible(visible)
+                return@requireMain
+            }
+            radarUrl = frame.tileUrl
+            style.getLayer("radar-layer")?.let { style.removeLayer(it) }
+            style.getSource("radar-source")?.let { style.removeSource(it) }
+
+            val tileSet = TileSet("2.1.0", frame.tileUrl)
+            style.addSource(RasterSource("radar-source", tileSet, 256))
+
+            val radarLayer = RasterLayer("radar-layer", "radar-source").withProperties(
+                PropertyFactory.rasterOpacity(0.55f),
+                PropertyFactory.visibility(if (visible) Property.VISIBLE else Property.NONE)
+            )
+            if (style.getLayer("airports-circle") != null) {
+                style.addLayerBelow(radarLayer, "airports-circle")
+            } else {
+                style.addLayer(radarLayer)
+            }
+        }
+    }
+
+    fun setRadarVisible(visible: Boolean) {
+        requireMain {
+            map?.style?.getLayer("radar-layer")?.setProperties(
+                PropertyFactory.visibility(if (visible) Property.VISIBLE else Property.NONE)
+            )
+        }
     }
 
     fun setLabelsVisible(visible: Boolean) = setLayerVisible("plane-labels", visible)

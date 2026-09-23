@@ -60,6 +60,11 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.Aircraft
+import com.example.plane_tracker.data.AirportBoard
+import com.example.plane_tracker.data.BoardEntry
+import com.example.plane_tracker.data.BoardKind
+import com.example.plane_tracker.data.EmergencyEvent
+import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.calculateClockETA
@@ -221,6 +226,231 @@ fun SearchOverlay(
     }
 }
 
+// ---------- Emergency banner ----------
+
+private val AlertRed = Color(0xF2B3261E)
+private val AlertRedSoft = Color(0xFFFFD0CB)
+
+/** Red banner for live emergency squawks (7700/7600/7500). */
+@Composable
+fun EmergencyBanner(
+    emergencies: List<EmergencyEvent>,
+    onSelect: (EmergencyEvent) -> Unit,
+    onDismiss: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = emergencies.isNotEmpty(),
+        enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+        exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
+        modifier = modifier
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            emergencies.take(2).forEach { e ->
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = AlertRed)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("⚠", color = AlertRedSoft, fontSize = 16.sp)
+                        Spacer(Modifier.width(10.dp))
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .clickable { onSelect(e) }
+                        ) {
+                            Text(
+                                "Squawk ${e.squawk} · ${e.label}",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "${e.callsign} · tap to view on map",
+                                color = AlertRedSoft,
+                                fontSize = 11.sp
+                            )
+                        }
+                        IconButton(onClick = { onDismiss(e.hex) }) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Dismiss alert",
+                                tint = AlertRedSoft,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------- Rain radar ----------
+
+private fun formatRadarTime(ms: Long): String =
+    java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ms))
+
+/** Rain radar status pill with play/pause and the currently shown frame time. */
+@Composable
+fun RadarOverlay(
+    radarOn: Boolean,
+    radarPlaying: Boolean,
+    frames: List<RadarFrame>,
+    currentIndex: Int,
+    onTogglePlay: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = radarOn && frames.isNotEmpty(),
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = modifier
+    ) {
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = PanelBg)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (radarPlaying) "⏸" else "▶",
+                    color = Accent,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(onClick = onTogglePlay)
+                        .padding(4.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Rain radar", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(8.dp))
+                val frame = frames.getOrNull(currentIndex) ?: frames.lastOrNull()
+                frame?.let {
+                    Text(formatRadarTime(it.timeMs), color = TextSecondary, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+// ---------- Airport board sheet ----------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AirportBoardSheet(
+    airport: Airports.Entry?,
+    board: AirportBoard?,
+    loading: Boolean,
+    onSelectAircraft: (Aircraft) -> Unit,
+    onClose: () -> Unit
+) {
+    if (airport == null) return
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        containerColor = PanelBgLight,
+        contentColor = TextPrimary
+    ) {
+        Column(
+            Modifier
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+        ) {
+            Text(
+                "${airport.iata} · Live traffic",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Text(airport.name, color = TextSecondary, fontSize = 12.sp)
+            Spacer(Modifier.height(14.dp))
+
+            if (loading) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Accent)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Scanning nearby traffic…", color = TextSecondary, fontSize = 13.sp)
+                }
+            } else {
+                val b = board
+                if (b == null || b.total == 0) {
+                    Text(
+                        "No tracked arrivals or departures within ${AirportBoardRadiusKm} km right now.",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                } else {
+                    BoardSection("DEPARTURES", b.departures, BoardKind.DEPARTURE, onSelectAircraft)
+                    Spacer(Modifier.height(10.dp))
+                    BoardSection("ARRIVALS", b.arrivals, BoardKind.ARRIVAL, onSelectAircraft)
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+private const val AirportBoardRadiusKm = 400
+
+@Composable
+private fun BoardSection(
+    title: String,
+    entries: List<BoardEntry>,
+    kind: BoardKind,
+    onSelect: (Aircraft) -> Unit
+) {
+    if (entries.isEmpty()) return
+    Text(title, color = TextSecondary, fontSize = 11.sp, letterSpacing = 1.sp)
+    entries.take(6).forEach { e ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onSelect(e.aircraft) }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(if (kind == BoardKind.DEPARTURE) "🛫" else "🛬", fontSize = 14.sp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    e.aircraft.callsign.ifEmpty { e.aircraft.icao24.uppercase() },
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                val sub = listOfNotNull(e.routeLabel, e.airlineName).joinToString(" · ")
+                if (sub.isNotEmpty()) {
+                    Text(sub, color = TextSecondary, fontSize = 11.sp, maxLines = 1)
+                }
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    "${e.distanceKm} km",
+                    color = TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    e.etaMinutes?.let { m ->
+                        if (m >= 60) "in ${m / 60}h ${m % 60}m" else "in ${m}m"
+                    } ?: "—",
+                    color = Accent,
+                    fontSize = 11.sp
+                )
+            }
+        }
+    }
+}
+
 // ---------- Map control buttons ----------
 
 @Composable
@@ -228,12 +458,14 @@ fun MapControls(
     airportsOn: Boolean,
     labelsOn: Boolean,
     is3D: Boolean,
+    radarOn: Boolean,
     onZoomIn: () -> Unit,
     onZoomOut: () -> Unit,
     onCenter: () -> Unit,
     onToggle3D: () -> Unit,
     onToggleAirports: () -> Unit,
     onToggleLabels: () -> Unit,
+    onToggleRadar: () -> Unit,
     onOpenFilters: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -246,6 +478,7 @@ fun MapControls(
         ControlButton("−", "Zoom out", onZoomOut)
         ControlButton("⌂", "Home view", onCenter)
         ControlButton("3D", "Toggle 3D view", onToggle3D, active = is3D)
+        ControlButton("RAD", "Rain radar", onToggleRadar, active = radarOn)
         ControlButton("AP", "Airports", onToggleAirports, active = airportsOn)
         ControlButton("AB", "Callsigns", onToggleLabels, active = labelsOn)
         ControlButton("☰", "Filters", onOpenFilters)
