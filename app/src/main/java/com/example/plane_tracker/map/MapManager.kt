@@ -211,7 +211,7 @@ class MapManager(context: Context) {
             )
             ids.add(id)
         }
-        planeLayerIds = ids
+        planeLayerIds = ids + "plane-labels"
 
         // --- Callsign labels (topmost) ---
         style.addLayer(
@@ -291,7 +291,7 @@ class MapManager(context: Context) {
             }
 
             frame.followPos?.let { follow ->
-                map?.animateCamera(CameraUpdateFactory.newLatLng(follow), 900, null)
+                map?.easeCamera(CameraUpdateFactory.newLatLng(follow), 200, false)
             }
         }
     }
