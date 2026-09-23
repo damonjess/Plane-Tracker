@@ -166,14 +166,24 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                     val ops = state?.aircraft.orEmpty()
                         .mapNotNull { ac -> opsCategoryFor(ac)?.let { ac to it } }
                         .sortedBy { it.second.ordinal }
-                    _uiState.value = _uiState.value.copy(
-                        aircraftCount = state?.aircraft?.size ?: 0,
-                        source = state?.source ?: "offline",
-                        lastUpdateMs = state?.fetchedAt ?: 0L,
-                        emergencies = emergencies.filter { it.hex !in dismissedEmergencyHexes },
-                        alertHistory = emergencyHistory.all(),
-                        opsAircraft = ops
-                    )
+                    // A failed poll yields an empty "offline" snapshot: keep the
+                    // last known counts/lists (engine still holds the fleet) and
+                    // just flag the data source as offline.
+                    if (state != null && state.aircraft.isNotEmpty()) {
+                        _uiState.value = _uiState.value.copy(
+                            aircraftCount = state.aircraft.size,
+                            source = state.source,
+                            lastUpdateMs = state.fetchedAt,
+                            emergencies = emergencies.filter { it.hex !in dismissedEmergencyHexes },
+                            alertHistory = emergencyHistory.all(),
+                            opsAircraft = ops
+                        )
+                    } else {
+                        _uiState.value = _uiState.value.copy(
+                            source = state?.source ?: "offline",
+                            alertHistory = emergencyHistory.all()
+                        )
+                    }
                 } catch (e: Exception) {
                     _uiState.value = _uiState.value.copy(source = "offline")
                 }
