@@ -297,7 +297,20 @@ class MapManager(context: Context) {
             }
 
             frame.followPos?.let { follow ->
-                map?.easeCamera(CameraUpdateFactory.newLatLng(follow), 200, false)
+                val m = map ?: return@let
+                val currentTilt = m.cameraPosition.tilt ?: 0.0
+                if (currentTilt > 10.0 && frame.followHeading != null) {
+                    val currentZoom = (m.cameraPosition.zoom ?: 13.0).coerceAtLeast(11.0)
+                    val cameraPosition = CameraPosition.Builder()
+                        .target(follow)
+                        .zoom(currentZoom)
+                        .tilt(currentTilt)
+                        .bearing(frame.followHeading.toDouble())
+                        .build()
+                    m.easeCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), 200, false)
+                } else {
+                    m.easeCamera(CameraUpdateFactory.newLatLng(follow), 200, false)
+                }
             }
         }
     }

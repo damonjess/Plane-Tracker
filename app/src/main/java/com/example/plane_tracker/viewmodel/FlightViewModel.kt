@@ -64,6 +64,10 @@ class FlightViewModel : ViewModel() {
 
     private var followingHex: String? = null
 
+    /** Triggered when a selected/followed aircraft transitions into descent during flight. */
+    var onAutoTiltTo3D: ((Double, Double, Float) -> Unit)? = null
+    private var lastSelectedWasDescending = false
+
     init {
         startPolling()
         startFrameTicker()
@@ -137,6 +141,18 @@ class FlightViewModel : ViewModel() {
             }
             .map { ac -> buildFeature(ac) }
 
+        // Trigger auto-tilt on transition to descent during live flight
+        val sel = selected
+        val isDescendingNow = sel != null && sel.climbFpm < -300
+        if (isDescendingNow && !lastSelectedWasDescending) {
+            onAutoTiltTo3D?.invoke(sel.latitude, sel.longitude, sel.heading)
+        }
+        lastSelectedWasDescending = isDescendingNow
+
+        val followHeading = if (followingHex != null) {
+            selected?.heading
+        } else null
+
         val followPos = if (followingHex != null) {
             selected?.let { org.maplibre.android.geometry.LatLng(it.latitude, it.longitude) }
         } else null
@@ -150,7 +166,8 @@ class FlightViewModel : ViewModel() {
             planes = FeatureCollection.fromFeatures(features),
             selected = selected,
             trailCoordinates = trailPoints,
-            followPos = followPos
+            followPos = followPos,
+            followHeading = followHeading
         )
     }
 
@@ -177,6 +194,7 @@ class FlightViewModel : ViewModel() {
     fun selectAircraft(hex: String, onFlyTo3D: ((Double, Double, Float) -> Unit)? = null) {
         engine.selectedHex = hex
         val ac = engine.aircraftByHex(hex)
+        lastSelectedWasDescending = ac?.let { it.climbFpm < -300 } ?: false
 
         if (ac != null) {
             _uiState.value = _uiState.value.copy(

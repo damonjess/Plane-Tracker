@@ -74,6 +74,9 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
 
     // Map callbacks
     LaunchedEffect(mapManager) {
+        viewModel.onAutoTiltTo3D = { lat, lon, heading ->
+            mapManager.flyTo3D(lat, lon, heading)
+        }
         mapManager.onCameraTiltChanged = { tilted -> is3D = tilted }
         mapManager.onPlaneTapped = { hex ->
             viewModel.selectAircraft(hex) { lat, lon, heading ->

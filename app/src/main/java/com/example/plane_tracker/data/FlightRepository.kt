@@ -121,6 +121,13 @@ class FlightRepository {
         )
     }
 
+    /** Fetches recent RainViewer radar frames for the map overlay. */
+    suspend fun fetchRadarFrames(): List<RadarFrame> = withContext(Dispatchers.IO) {
+        val body = getBody("https://api.rainviewer.com/public/weather-maps.json")
+            ?: return@withContext emptyList()
+        parseRadarMapsJson(body)
+    }
+
     /** Resolves an aircraft photo from planespotters.net. */
     suspend fun fetchPhotoUrl(hex: String): String? = withContext(Dispatchers.IO) {
         if (hex.isBlank()) return@withContext null

@@ -1,6 +1,7 @@
 package com.example.plane_tracker.data
 
 import com.example.plane_tracker.util.GeoMath
+import org.maplibre.android.geometry.LatLng
 
 /** One historical position sample for the selected aircraft's trail. */
 data class TrailPoint(
@@ -15,7 +16,8 @@ data class MapFrame(
     val planes: org.maplibre.geojson.FeatureCollection,
     val selected: Aircraft?,
     val trailCoordinates: List<org.maplibre.geojson.Point>,
-    val followPos: org.maplibre.android.geometry.LatLng?
+    val followPos: LatLng?,
+    val followHeading: Float? = null
 )
 
 /**
