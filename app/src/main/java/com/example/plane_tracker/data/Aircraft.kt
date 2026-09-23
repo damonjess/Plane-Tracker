@@ -63,7 +63,9 @@ data class Airport(
     val iata: String?,
     val icao: String?,
     val latitude: Double?,
-    val longitude: Double?
+    val longitude: Double?,
+    val municipality: String? = null,
+    val country: String? = null
 )
 
 /** Details for the selected-aircraft panel. */

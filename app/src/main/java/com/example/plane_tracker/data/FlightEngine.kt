@@ -33,6 +33,7 @@ class FlightEngine {
     var lastFleetState: FleetState? = null
         private set
 
+    @Volatile
     var selectedHex: String? = null
 
     /** Trail sample interval in ms (record roughly every 10s). */
@@ -52,6 +53,7 @@ class FlightEngine {
         }
         // Expire aircraft not seen for 5 minutes.
         fleet.entries.removeAll { now - it.value.lastSeen > 300_000 }
+        history.entries.removeAll { now - it.value.lastSeen > 300_000 }
     }
 
     private fun recordTrailPoint(ac: Aircraft, now: Long) {

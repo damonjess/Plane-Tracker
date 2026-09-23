@@ -93,12 +93,22 @@ class FlightRepository {
 
         fun airport(key: String): Airport? {
             val obj = routeJson.optJSONObject(key) ?: return null
+            val iata = obj.optStringOrNull("iata_code")
+            val icao = obj.optStringOrNull("icao_code")
+            val fallbackEntry = Airports.byIata(iata) ?: Airports.byIcao(icao)
+            val name = obj.optStringOrNull("name")
+                ?: fallbackEntry?.name
+                ?: iata
+                ?: icao
+                ?: return null
             return Airport(
-                name = obj.optStringOrNull("name") ?: return null,
-                iata = obj.optStringOrNull("iata_code"),
-                icao = obj.optStringOrNull("icao_code"),
-                latitude = obj.optDoubleOrNull("latitude"),
-                longitude = obj.optDoubleOrNull("longitude")
+                name = name,
+                iata = iata ?: fallbackEntry?.iata,
+                icao = icao ?: fallbackEntry?.icao,
+                latitude = obj.optDoubleOrNull("latitude") ?: fallbackEntry?.lat,
+                longitude = obj.optDoubleOrNull("longitude") ?: fallbackEntry?.lon,
+                municipality = obj.optStringOrNull("municipality"),
+                country = obj.optStringOrNull("country_name")
             )
         }
 

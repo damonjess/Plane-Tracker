@@ -1,11 +1,15 @@
 package com.example.plane_tracker
 
+import com.example.plane_tracker.data.Aircraft
+import com.example.plane_tracker.data.Airport
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.AltitudeColors
 import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.util.GeoMath
+import com.example.plane_tracker.util.RouteProgressCalculator
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -47,6 +51,12 @@ class GeoMathTest {
 }
 
 class AltitudeColorsTest {
+
+    @Test
+    fun `ground color is included in allColors`() {
+        assertEquals("#b0bec5", AltitudeColors.GROUND_COLOR)
+        assertTrue(AltitudeColors.allColors.contains("#b0bec5"))
+    }
 
     @Test
     fun `ground is red and low climb is orange`() {
@@ -109,5 +119,55 @@ class ParsingTest {
         assertEquals("abc123", ac.icao24)
         assertEquals(0.0, ac.altitudeMeters, 1e-9)
         assertEquals(0, ac.altitudeFt)
+    }
+}
+
+class RouteProgressTest {
+
+    private val origin = Airport("London Heathrow", "LHR", "EGLL", 51.4700, -0.4543, "London", "United Kingdom")
+    private val destination = Airport("Dublin", "DUB", "EIDW", 53.4213, -6.2701, "Dublin", "Ireland")
+
+    private fun aircraftAt(lat: Double, lon: Double, speedMps: Double = 220.0) = Aircraft(
+        icao24 = "test", callsign = "TEST1", longitude = lon, latitude = lat,
+        heading = 0f, altitudeMeters = 9000.0, velocityMps = speedMps,
+        verticalRateMps = 0.0, onGround = false
+    )
+
+    @Test
+    fun `midpoint aircraft is roughly half way`() {
+        val midLat = (51.4700 + 53.4213) / 2
+        val midLon = (-0.4543 + -6.2701) / 2
+        val p = RouteProgressCalculator.compute(aircraftAt(midLat, midLon), origin, destination)!!
+        assertEquals(0.5f, p.fraction, 0.02f)
+        assertEquals(p.totalKm, p.flownKm + p.remainingKm, 20.0)
+    }
+
+    @Test
+    fun `eta derived from ground speed and remaining distance`() {
+        val p = RouteProgressCalculator.compute(
+            aircraftAt(51.4700, -0.4543, speedMps = 200.0), origin, destination
+        )!!
+        val expectedMinutes = p.remainingKm * 1000.0 / 200.0 / 60.0
+        assertEquals(expectedMinutes, p.etaMinutes!!.toDouble(), 1.0)
+    }
+
+    @Test
+    fun `grounded or slow aircraft has no eta`() {
+        val grounded = aircraftAt(51.4700, -0.4543).copy(onGround = true)
+        assertNull(RouteProgressCalculator.compute(grounded, origin, destination)?.etaMinutes)
+        val slow = aircraftAt(51.4700, -0.4543, speedMps = 5.0)
+        assertNull(RouteProgressCalculator.compute(slow, origin, destination)?.etaMinutes)
+    }
+
+    @Test
+    fun `fraction clamps to 1 beyond destination`() {
+        val beyond = RouteProgressCalculator.compute(aircraftAt(54.5, -7.0), origin, destination)!!
+        assertEquals(1f, beyond.fraction)
+    }
+
+    @Test
+    fun `missing airport coordinates yield null`() {
+        val noCoords = Airport("Nowhere", "XXX", null, null, null)
+        assertNull(RouteProgressCalculator.compute(aircraftAt(51.0, 0.0), noCoords, destination))
     }
 }

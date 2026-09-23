@@ -2,6 +2,8 @@ package com.example.plane_tracker.data
 
 /** Colors aircraft by altitude band, mirroring FR24's altitude color scale. */
 object AltitudeColors {
+    const val GROUND_COLOR = "#b0bec5"
+
     // Ascending bands: low -> high. Each entry is [maxAltitudeMeters, colorHex]
     val bands = listOf(
         0L to "#e04545",      // on ground / very low
@@ -15,6 +17,9 @@ object AltitudeColors {
         12500L to "#3b7bd6",
         Long.MAX_VALUE to "#7a5fd0" // very high
     )
+
+    /** All distinct colors used across altitude bands and ground state. */
+    val allColors: List<String> = (listOf(GROUND_COLOR) + bands.map { it.second }).distinct()
 
     /** Returns the hex color for an altitude given in meters. */
     fun forAltitude(altitudeMeters: Double): String {

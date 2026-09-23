@@ -44,7 +44,8 @@ object GeoMath {
         val dLon = Math.toRadians(lon2 - lon1)
         val a = sin(dLat / 2) * sin(dLat / 2) +
             cos(rLat1) * cos(rLat2) * sin(dLon / 2) * sin(dLon / 2)
-        return 6_371_000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
+        val aCoerced = a.coerceIn(0.0, 1.0)
+        return 6_371_000.0 * 2 * atan2(sqrt(aCoerced), sqrt(1 - aCoerced))
     }
 
     /**

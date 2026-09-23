@@ -182,9 +182,9 @@ class MapManager(context: Context) {
                 )
         )
 
-        // --- Plane layers: one per altitude color band (FR24-style scale) ---
+        // --- Plane layers: one per altitude color band + ground state ---
         val ids = mutableListOf<String>()
-        AltitudeColors.bands.forEach { (_, color) ->
+        AltitudeColors.allColors.forEach { color ->
             ensureIcon(style, color)
             val id = "planes-$color"
             style.addLayer(

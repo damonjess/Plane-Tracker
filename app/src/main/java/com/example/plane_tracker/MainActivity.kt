@@ -176,6 +176,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         uiState.selected?.let { selected ->
             FlightDetailsPanel(
                 selected = selected,
+                routeProgress = uiState.routeProgress,
                 isLoading = uiState.isLoadingDetails,
                 isFollowing = uiState.isFollowing,
                 onClose = viewModel::clearSelection,

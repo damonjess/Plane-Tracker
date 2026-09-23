@@ -9,12 +9,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -59,6 +61,7 @@ import coil.compose.AsyncImage
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.Aircraft
 import com.example.plane_tracker.data.SelectedFlight
+import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.viewmodel.FilterState
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -297,6 +300,7 @@ fun FollowingChip(onCancel: () -> Unit, modifier: Modifier = Modifier) {
 @Composable
 fun FlightDetailsPanel(
     selected: SelectedFlight,
+    routeProgress: RouteProgress?,
     isLoading: Boolean,
     isFollowing: Boolean,
     onClose: () -> Unit,
@@ -439,24 +443,14 @@ fun FlightDetailsPanel(
                         }
                     }
 
-                    // Route airports
+                    // FR24-style route section: origin -> plane -> destination,
+                    // live progress bar and flown/remaining strip.
                     val route = selected.route
                     if (route != null && (route.origin != null || route.destination != null)) {
                         HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(route.origin?.iata ?: "—", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                                Text(route.origin?.name ?: "", color = TextSecondary, fontSize = 11.sp)
-                            }
-                            Text("→", color = Accent, fontSize = 16.sp)
-                            Column(
-                                Modifier.weight(1f),
-                                horizontalAlignment = Alignment.End
-                            ) {
-                                Text(route.destination?.iata ?: "—", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                                Text(route.destination?.name ?: "", color = TextSecondary, fontSize = 11.sp, textAlign = TextAlign.End)
-                            }
-                        }
+                        RouteHeader(route.origin, route.destination)
+                        RouteProgressBar(routeProgress)
+                        RouteStatsStrip(route.origin, route.destination, routeProgress)
                     }
                 }
             }
@@ -470,6 +464,146 @@ private fun DataCell(label: String, value: String, modifier: Modifier = Modifier
         Text(label, color = TextSecondary, fontSize = 10.sp, letterSpacing = 1.sp)
         Text(value, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
     }
+}
+
+// ---------- FR24-style route section ----------
+
+@Composable
+private fun RouteHeader(
+    origin: com.example.plane_tracker.data.Airport?,
+    destination: com.example.plane_tracker.data.Airport?
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Origin
+        Column(Modifier.weight(1f)) {
+            Text(
+                origin?.iata ?: "—",
+                color = TextPrimary,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                origin?.municipality ?: origin?.name ?: "",
+                color = TextSecondary,
+                fontSize = 11.sp,
+                maxLines = 1
+            )
+            origin?.country?.let {
+                Text(it, color = TextSecondary, fontSize = 10.sp, maxLines = 1)
+            }
+        }
+
+        // Plane badge between the airports
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .background(Accent, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("✈", color = Color(0xFF101014), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+
+        // Destination
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+            Text(
+                destination?.iata ?: "—",
+                color = TextPrimary,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.End
+            )
+            Text(
+                destination?.municipality ?: destination?.name ?: "",
+                color = TextSecondary,
+                fontSize = 11.sp,
+                maxLines = 1,
+                textAlign = TextAlign.End
+            )
+            destination?.country?.let {
+                Text(it, color = TextSecondary, fontSize = 10.sp, maxLines = 1, textAlign = TextAlign.End)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RouteProgressBar(progress: RouteProgress?) {
+    if (progress == null) return
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .height(22.dp)
+    ) {
+        val barWidth = maxWidth - 22.dp // room for the plane marker at 100%
+        // Track
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxWidth()
+                .height(4.dp)
+                .background(TextSecondary.copy(alpha = 0.25f), RoundedCornerShape(2.dp))
+        )
+        // Flown portion
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .width(barWidth * progress.fraction)
+                .height(4.dp)
+                .background(Accent, RoundedCornerShape(2.dp))
+        )
+        // Plane marker riding the bar, rotated to point along travel direction
+        Text(
+            "✈",
+            color = Accent,
+            fontSize = 16.sp,
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .offset(x = barWidth * progress.fraction)
+        )
+    }
+}
+
+@Composable
+private fun RouteStatsStrip(
+    origin: com.example.plane_tracker.data.Airport?,
+    destination: com.example.plane_tracker.data.Airport?,
+    progress: RouteProgress?
+) {
+    val text = if (progress != null) {
+        buildString {
+            append("${progress.flownKm.roundToInt()} km flown")
+            append("  ·  ${progress.remainingKm.roundToInt()} km to go")
+            progress.etaMinutes?.let { mins ->
+                val etaStr = if (mins >= 60) "~${mins / 60}h ${mins % 60}m to arrival" else "~${mins}m to arrival"
+                append("  ·  $etaStr")
+            }
+        }
+    } else {
+        // No live position/progress: show total route distance if we can.
+        val o = origin?.latitude?.let { lat -> origin.longitude?.let { lon -> lat to lon } }
+        val d = destination?.latitude?.let { lat -> destination.longitude?.let { lon -> lat to lon } }
+        if (o != null && d != null) {
+            val totalKm = com.example.plane_tracker.util.GeoMath.distanceMeters(
+                o.first, o.second, d.first, d.second
+            ) / 1000.0
+            "${totalKm.roundToInt()} km total route"
+        } else ""
+    }
+    if (text.isEmpty()) return
+    Text(
+        text = text,
+        color = TextSecondary,
+        fontSize = 12.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
+    )
 }
 
 // ---------- Filter bottom sheet ----------

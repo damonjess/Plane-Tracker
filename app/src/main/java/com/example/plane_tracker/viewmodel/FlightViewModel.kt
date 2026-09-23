@@ -8,6 +8,8 @@ import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.data.FlightRepository
 import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.data.MapFrame
+import com.example.plane_tracker.util.RouteProgress
+import com.example.plane_tracker.util.RouteProgressCalculator
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +34,7 @@ data class FilterState(
 /** Top-level UI state exposed to Compose. */
 data class TrackerUiState(
     val selected: SelectedFlight? = null,
+    val routeProgress: RouteProgress? = null,
     val aircraftCount: Int = 0,
     val source: String = "…",
     val lastUpdateMs: Long = 0L,
@@ -106,6 +109,27 @@ class FlightViewModel : ViewModel() {
         // Prune old trail samples periodically.
         trails(now)
 
+        // Live route progress for the selected flight (position vs both airports).
+        val progress = selected?.let { sel ->
+            _uiState.value.selected?.route?.let { route ->
+                route.origin?.takeIf { it.latitude != null && it.longitude != null }
+                    ?.let { o -> route.destination?.let { d -> RouteProgressCalculator.compute(sel, o, d) } }
+            }
+        }
+
+        // Keep live flight details panel updated with current position / speed / altitude
+        val currentSelected = _uiState.value.selected
+        val updatedSelected = if (currentSelected != null && selected != null && currentSelected.aircraft != selected) {
+            currentSelected.copy(aircraft = selected)
+        } else currentSelected
+
+        if (progress != _uiState.value.routeProgress || updatedSelected != currentSelected) {
+            _uiState.value = _uiState.value.copy(
+                routeProgress = progress,
+                selected = updatedSelected
+            )
+        }
+
         val features = engine.allAircraft(now)
             .filter { ac ->
                 val altFt = if (ac.onGround) 0 else ac.altitudeFt
@@ -154,6 +178,7 @@ class FlightViewModel : ViewModel() {
         engine.selectedHex = hex
         _uiState.value = _uiState.value.copy(
             selected = engine.aircraftByHex(hex)?.let { SelectedFlight(it) },
+            routeProgress = null,
             isLoadingDetails = true
         )
         viewModelScope.launch {
@@ -181,7 +206,7 @@ class FlightViewModel : ViewModel() {
         engine.selectedHex = null
         followingHex = null
         _uiState.value = _uiState.value.copy(
-            selected = null, isFollowing = false, isLoadingDetails = false
+            selected = null, routeProgress = null, isFollowing = false, isLoadingDetails = false
         )
     }
 
