@@ -66,6 +66,8 @@ class MapManager(context: Context) {
     var onPlaneTapped: ((String) -> Unit)? = null
     /** Called for taps on empty map area. */
     var onMapTapped: (() -> Unit)? = null
+    /** Called when camera pitch/tilt changes (true = 3D tilted). */
+    var onCameraTiltChanged: ((Boolean) -> Unit)? = null
 
     private val mainHandler = android.os.Handler(Looper.getMainLooper())
     private fun requireMain(block: () -> Unit) {
@@ -82,6 +84,10 @@ class MapManager(context: Context) {
                     map.addOnMapClickListener { point ->
                         handleTap(point)
                         true
+                    }
+                    map.addOnCameraIdleListener {
+                        val isTilted = (map.cameraPosition.tilt ?: 0.0) > 10.0
+                        onCameraTiltChanged?.invoke(isTilted)
                     }
                     map.cameraPosition = CameraPosition.Builder()
                         .target(LatLng(DEFAULT_LAT, DEFAULT_LON))
@@ -326,6 +332,7 @@ class MapManager(context: Context) {
                 CameraUpdateFactory.newCameraPosition(cameraPosition),
                 600, null
             )
+            onCameraTiltChanged?.invoke(false)
         }
     }
 
@@ -347,6 +354,48 @@ class MapManager(context: Context) {
                 .build()
 
             map?.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), 1200, null)
+            onCameraTiltChanged?.invoke(true)
+        }
+    }
+
+    fun set2D() {
+        requireMain {
+            val m = map ?: return@requireMain
+            val target = m.cameraPosition.target ?: LatLng(DEFAULT_LAT, DEFAULT_LON)
+            val zoom = m.cameraPosition.zoom ?: DEFAULT_ZOOM
+            val cameraPosition = CameraPosition.Builder()
+                .target(target)
+                .zoom(zoom)
+                .tilt(0.0)
+                .bearing(0.0)
+                .build()
+            m.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), 600, null)
+            onCameraTiltChanged?.invoke(false)
+        }
+    }
+
+    fun set3D(heading: Double = map?.cameraPosition?.bearing ?: 0.0) {
+        requireMain {
+            val m = map ?: return@requireMain
+            val target = m.cameraPosition.target ?: LatLng(DEFAULT_LAT, DEFAULT_LON)
+            val zoom = m.cameraPosition.zoom.coerceAtLeast(11.0)
+            val cameraPosition = CameraPosition.Builder()
+                .target(target)
+                .zoom(zoom)
+                .tilt(60.0)
+                .bearing(heading)
+                .build()
+            m.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), 800, null)
+            onCameraTiltChanged?.invoke(true)
+        }
+    }
+
+    fun toggle2D3D(heading: Float? = null) {
+        val currentTilt = map?.cameraPosition?.tilt ?: 0.0
+        if (currentTilt > 10.0) {
+            set2D()
+        } else {
+            set3D(heading?.toDouble() ?: map?.cameraPosition?.bearing ?: 0.0)
         }
     }
 

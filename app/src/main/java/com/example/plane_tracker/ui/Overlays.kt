@@ -227,9 +227,11 @@ fun SearchOverlay(
 fun MapControls(
     airportsOn: Boolean,
     labelsOn: Boolean,
+    is3D: Boolean,
     onZoomIn: () -> Unit,
     onZoomOut: () -> Unit,
     onCenter: () -> Unit,
+    onToggle3D: () -> Unit,
     onToggleAirports: () -> Unit,
     onToggleLabels: () -> Unit,
     onOpenFilters: () -> Unit,
@@ -243,6 +245,7 @@ fun MapControls(
         ControlButton("+", "Zoom in", onZoomIn)
         ControlButton("−", "Zoom out", onZoomOut)
         ControlButton("⌂", "Home view", onCenter)
+        ControlButton("3D", "Toggle 3D view", onToggle3D, active = is3D)
         ControlButton("AP", "Airports", onToggleAirports, active = airportsOn)
         ControlButton("AB", "Callsigns", onToggleLabels, active = labelsOn)
         ControlButton("☰", "Filters", onOpenFilters)

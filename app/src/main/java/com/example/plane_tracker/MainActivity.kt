@@ -65,6 +65,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val mapManager = remember { MapManager(context) }
     var filtersOpen by remember { mutableStateOf(false) }
+    var is3D by remember { mutableStateOf(false) }
 
     val uiState by viewModel.uiState.collectAsState()
 
@@ -73,6 +74,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
 
     // Map callbacks
     LaunchedEffect(mapManager) {
+        mapManager.onCameraTiltChanged = { tilted -> is3D = tilted }
         mapManager.onPlaneTapped = { hex ->
             viewModel.selectAircraft(hex) { lat, lon, heading ->
                 mapManager.flyTo3D(lat, lon, heading)
@@ -169,9 +171,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         MapControls(
             airportsOn = uiState.filters.showAirports,
             labelsOn = uiState.filters.showLabels,
+            is3D = is3D,
             onZoomIn = { mapManager.zoomBy(+1.5) },
             onZoomOut = { mapManager.zoomBy(-1.5) },
             onCenter = mapManager::centerOnDefault,
+            onToggle3D = { mapManager.toggle2D3D(uiState.selected?.aircraft?.heading) },
             onToggleAirports = viewModel::toggleAirports,
             onToggleLabels = viewModel::toggleLabels,
             onOpenFilters = { filtersOpen = true },
