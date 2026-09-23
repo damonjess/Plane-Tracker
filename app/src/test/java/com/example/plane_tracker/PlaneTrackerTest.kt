@@ -436,6 +436,7 @@ class OpsClassifierTest {
     fun `air ambulance and police owners classify`() {
         assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(ac(), "Wiltshire Air Ambulance"))
         assertEquals(OpsCategory.POLICE, OpsClassifier.classify(ac(), "National Police Air Service"))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(ac(), "Police Department of North Carolina"))
     }
 
     @Test

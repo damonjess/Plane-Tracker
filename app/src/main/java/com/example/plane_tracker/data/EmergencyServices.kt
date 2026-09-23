@@ -12,17 +12,17 @@ enum class OpsCategory(val label: String, val emoji: String, val ringColor: Stri
     POLICE("Police", "🚁", "#2196f3"),
     MILITARY("Military", "🪖", "#9c27b0"),
     FIRE("Fire support", "🚁", "#e65100"),
-    LIFEBOAT("Lifeboat", "🛥", "#ff9800")
+    LIFEBOAT("Lifeboat", "🛥", "#00bcd4")
 }
 
 object OpsClassifier {
 
     /** Owner-name patterns, checked in priority order (most specific first). */
     private val patterns: List<Pair<Regex, OpsCategory>> = listOf(
-        Regex("coastguard|coast guard|her majesty.?s coastguard|hmcg|sar helicopter", IGNORE_CASE) to OpsCategory.COASTGUARD,
+        Regex("coastguard|coast guard|h\\.?m\\.? coastguard|his majesty.?s coastguard|her majesty.?s coastguard|hmcg|sar helicopter", IGNORE_CASE) to OpsCategory.COASTGUARD,
         Regex("royal national lifeboat|rnli", IGNORE_CASE) to OpsCategory.LIFEBOAT,
         Regex("air ?ambulance|airambulance", IGNORE_CASE) to OpsCategory.AIR_AMBULANCE,
-        Regex("national police air service|npas|police(?!.*car)|constabulary air|police aviation", IGNORE_CASE) to OpsCategory.POLICE,
+        Regex("national police air service|npas|\\bpolice\\b|constabulary|police aviation", IGNORE_CASE) to OpsCategory.POLICE,
         Regex("fire ?service|fire ?and ?rescue|fire ?support", IGNORE_CASE) to OpsCategory.FIRE,
         Regex(
             "royal air force|\\braf\\b|royal navy|\\brn\\b|army air corps|british army|royal marines|" +

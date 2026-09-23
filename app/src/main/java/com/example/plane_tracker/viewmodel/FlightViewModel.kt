@@ -14,13 +14,17 @@ import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.data.FlightRepository
 import com.example.plane_tracker.data.Metar
 import com.example.plane_tracker.data.SelectedFlight
+import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.MapFrame
 import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.RouteProgressCalculator
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -94,6 +98,10 @@ class FlightViewModel : ViewModel() {
 
     private val dismissedEmergencyHexes = mutableSetOf<String>()
     private var openAirportPageEntry: Airports.Entry? = null
+    /** Generation counter so stale airport loads can't write state. */
+    private var airportLoadGen = 0
+    /** Identifies the current airport refresh loop; opening a new airport cancels the old one. */
+    private var airportRefreshTick = 0
 
     /** Cached special-ops classification per hex (coastguard, police, military...). */
     private val opsCategories = java.util.concurrent.ConcurrentHashMap<String, OpsCategory>()
@@ -405,6 +413,7 @@ class FlightViewModel : ViewModel() {
     /** Opens the FR24-style airport page: weather + live boards + ground traffic. */
     fun openAirportPage(entry: Airports.Entry) {
         openAirportPageEntry = entry
+        airportRefreshTick++
         _uiState.value = _uiState.value.copy(
             airportPage = entry,
             airportMetar = null,
@@ -412,50 +421,111 @@ class FlightViewModel : ViewModel() {
             airportOnGround = emptyList(),
             airportLoading = true
         )
+        loadAirportPageData(entry)
+        startAirportRefreshLoop(entry)
+    }
+
+    /**
+     * Loads the airport page data with **progressive** board rendering: METAR
+     * and ground traffic land as soon as each resolves, and the departures /
+     * arrivals board grows row by row as each route lookup completes instead
+     * of appearing in one batch. Route lookups run 3 at a time (polite to
+     * adsbdb, still ~1-2s for a full board).
+     */
+    private fun loadAirportPageData(entry: Airports.Entry) {
+        val gen = ++airportLoadGen
         viewModelScope.launch {
             try {
-                // METAR weather (best-effort, never blocks the page).
-                val metar = try {
-                    repository.fetchMetar(entry.icao)
-                } catch (_: Exception) {
-                    null
-                }
-                // Live departures/arrivals + on-ground traffic.
-                val aircraft = engine.allAircraft(System.currentTimeMillis())
-                val candidates = AirportBoardBuilder.candidateCallsigns(entry.lat, entry.lon, aircraft)
-                val routes = candidates.associateWith { cs ->
-                    try {
-                        repository.fetchRoute(cs)
+                val limiter = Semaphore(3)
+
+                // METAR weather: updates the moment it arrives.
+                val metarJob = launch {
+                    val metar = try {
+                        repository.fetchMetar(entry.icao)
                     } catch (_: Exception) {
                         null
                     }
+                    if (gen == airportLoadGen && metar != null) {
+                        _uiState.value = _uiState.value.copy(airportMetar = metar)
+                    }
                 }
-                val board = AirportBoardBuilder.build(entry.iata, entry.lat, entry.lon, aircraft, routes)
+
+                val aircraft = engine.allAircraft(System.currentTimeMillis())
+
+                // Ground traffic: show immediately.
                 val onGround = aircraft.filter {
                     it.onGround && !it.latitude.isNaN() && !it.longitude.isNaN() &&
                         GeoMath.distanceMeters(entry.lat, entry.lon, it.latitude, it.longitude) < 15_000
                 }
-                if (openAirportPageEntry == entry) {
+                if (gen == airportLoadGen) {
+                    _uiState.value = _uiState.value.copy(airportOnGround = onGround)
+                }
+
+                // Route lookups: 3 concurrent, board rebuilt after each resolve.
+                val routes = java.util.concurrent.ConcurrentHashMap<String, RouteInfo?>()
+                val candidates = AirportBoardBuilder.candidateCallsigns(entry.lat, entry.lon, aircraft)
+                coroutineScope {
+                    candidates.forEach { cs ->
+                        launch {
+                            limiter.withPermit {
+                                val route = try {
+                                    repository.fetchRoute(cs)
+                                } catch (_: Exception) {
+                                    null
+                                }
+                                if (route != null && gen == airportLoadGen) {
+                                    routes[cs] = route
+                                    val now = engine.allAircraft(System.currentTimeMillis())
+                                    val board = AirportBoardBuilder.build(entry.iata, entry.lat, entry.lon, now, routes)
+                                    _uiState.value = _uiState.value.copy(
+                                        airportBoard = board,
+                                        airportLoading = board.total == 0
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Batch complete: final authoritative board + ground list.
+                if (gen == airportLoadGen) {
+                    val now = engine.allAircraft(System.currentTimeMillis())
+                    val board = AirportBoardBuilder.build(entry.iata, entry.lat, entry.lon, now, routes)
+                    val groundNow = now.filter {
+                        it.onGround && !it.latitude.isNaN() && !it.longitude.isNaN() &&
+                            GeoMath.distanceMeters(entry.lat, entry.lon, it.latitude, it.longitude) < 15_000
+                    }
                     _uiState.value = _uiState.value.copy(
-                        airportMetar = metar,
                         airportBoard = board,
-                        airportOnGround = onGround,
+                        airportOnGround = groundNow,
                         airportLoading = false
                     )
                 }
+                metarJob.join()
             } catch (_: Exception) {
-                if (openAirportPageEntry == entry) {
-                    _uiState.value = _uiState.value.copy(
-                        airportBoard = AirportBoard(entry.iata, emptyList(), emptyList()),
-                        airportLoading = false
-                    )
+                if (gen == airportLoadGen) {
+                    _uiState.value = _uiState.value.copy(airportLoading = false)
                 }
+            }
+        }
+    }
+
+    /** Re-runs the airport page load every 30s while the sheet stays open. */
+    private fun startAirportRefreshLoop(entry: Airports.Entry) {
+        val tick = airportRefreshTick
+        viewModelScope.launch {
+            while (airportRefreshTick == tick && openAirportPageEntry == entry) {
+                delay(30_000)
+                if (airportRefreshTick != tick || openAirportPageEntry != entry) break
+                loadAirportPageData(entry)
             }
         }
     }
 
     fun closeAirportPage() {
         openAirportPageEntry = null
+        airportLoadGen++
+        airportRefreshTick++
         _uiState.value = _uiState.value.copy(
             airportPage = null, airportMetar = null, airportBoard = null,
             airportOnGround = emptyList(), airportLoading = false
