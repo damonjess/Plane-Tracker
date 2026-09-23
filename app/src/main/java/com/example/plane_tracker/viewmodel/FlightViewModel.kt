@@ -174,15 +174,32 @@ class FlightViewModel : ViewModel() {
     }
 
     /** User tapped a plane on the map. */
-    fun selectAircraft(hex: String) {
+    fun selectAircraft(hex: String, onFlyTo3D: ((Double, Double, Float) -> Unit)? = null) {
         engine.selectedHex = hex
-        _uiState.value = _uiState.value.copy(
-            selected = engine.aircraftByHex(hex)?.let { SelectedFlight(it) },
-            routeProgress = null,
-            isLoadingDetails = true
-        )
+        val ac = engine.aircraftByHex(hex)
+
+        if (ac != null) {
+            _uiState.value = _uiState.value.copy(
+                selected = SelectedFlight(ac),
+                routeProgress = null,
+                isLoadingDetails = true
+            )
+
+            // If the plane is actively descending, trigger 3D view.
+            // Threshold -300 fpm: ADS-B vertical rate is quantized in 64 fpm steps,
+            // so level flight wobbles between 0 and ±64 — -50 would false-positive.
+            if (ac.climbFpm < -300) {
+                onFlyTo3D?.invoke(ac.latitude, ac.longitude, ac.heading)
+            }
+        } else {
+            _uiState.value = _uiState.value.copy(
+                selected = null,
+                routeProgress = null,
+                isLoadingDetails = true
+            )
+        }
+
         viewModelScope.launch {
-            val ac = engine.aircraftByHex(hex)
             if (ac == null) {
                 _uiState.value = _uiState.value.copy(isLoadingDetails = false)
                 return@launch
@@ -247,9 +264,17 @@ class FlightViewModel : ViewModel() {
     }
 
     /** Focus the map on a search result. */
-    fun focusSearchResult(ac: Aircraft, onFocused: (Double, Double) -> Unit) {
-        onFocused(ac.latitude, ac.longitude)
-        selectAircraft(ac.icao24)
+    fun focusSearchResult(
+        ac: Aircraft,
+        onFocused: (Double, Double) -> Unit,
+        onFlyTo3D: ((Double, Double, Float) -> Unit)? = null
+    ) {
+        if (ac.climbFpm < -300 && onFlyTo3D != null) {
+            selectAircraft(ac.icao24, onFlyTo3D)
+        } else {
+            onFocused(ac.latitude, ac.longitude)
+            selectAircraft(ac.icao24)
+        }
         updateSearch("")
     }
 

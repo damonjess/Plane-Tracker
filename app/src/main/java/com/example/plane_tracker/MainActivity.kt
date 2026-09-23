@@ -73,7 +73,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
 
     // Map callbacks
     LaunchedEffect(mapManager) {
-        mapManager.onPlaneTapped = { hex -> viewModel.selectAircraft(hex) }
+        mapManager.onPlaneTapped = { hex ->
+            viewModel.selectAircraft(hex) { lat, lon, heading ->
+                mapManager.flyTo3D(lat, lon, heading)
+            }
+        }
         mapManager.onMapTapped = { viewModel.clearSelection() }
     }
 
@@ -128,7 +132,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 },
                 onQueryChange = viewModel::updateSearch,
                 onAircraftClick = { ac ->
-                    viewModel.focusSearchResult(ac) { lat, lon -> mapManager.flyTo(lat, lon) }
+                    viewModel.focusSearchResult(
+                        ac,
+                        onFocused = { lat, lon -> mapManager.flyTo(lat, lon) },
+                        onFlyTo3D = { lat, lon, heading -> mapManager.flyTo3D(lat, lon, heading) }
+                    )
                 },
                 onAirportClick = { ap ->
                     mapManager.flyTo(ap.lat, ap.lon, 9.0)

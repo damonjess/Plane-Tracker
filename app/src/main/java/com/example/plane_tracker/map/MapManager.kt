@@ -315,16 +315,39 @@ class MapManager(context: Context) {
     }
 
     fun centerOnDefault() {
-        map?.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(LatLng(DEFAULT_LAT, DEFAULT_LON), DEFAULT_ZOOM),
-            600, null
-        )
+        requireMain {
+            val cameraPosition = CameraPosition.Builder()
+                .target(LatLng(DEFAULT_LAT, DEFAULT_LON))
+                .zoom(DEFAULT_ZOOM)
+                .tilt(0.0)
+                .bearing(0.0)
+                .build()
+            map?.animateCamera(
+                CameraUpdateFactory.newCameraPosition(cameraPosition),
+                600, null
+            )
+        }
     }
 
     fun flyTo(latitude: Double, longitude: Double, zoom: Double = 10.5) {
-        map?.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(LatLng(latitude, longitude), zoom), 900, null
-        )
+        requireMain {
+            map?.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(LatLng(latitude, longitude), zoom), 900, null
+            )
+        }
+    }
+
+    fun flyTo3D(latitude: Double, longitude: Double, heading: Float, zoom: Double = 13.0) {
+        requireMain {
+            val cameraPosition = CameraPosition.Builder()
+                .target(LatLng(latitude, longitude))
+                .zoom(zoom)
+                .tilt(60.0)      // Tilts the camera into a 3D perspective
+                .bearing(heading.toDouble()) // Rotates the map to match the plane's heading
+                .build()
+
+            map?.animateCamera(CameraUpdateFactory.newCameraPosition(cameraPosition), 1200, null)
+        }
     }
 
     fun zoomBy(delta: Double) {

@@ -1,11 +1,26 @@
 package com.example.plane_tracker.util
 
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
+
+/**
+ * Formats the remaining flight time in minutes as a real-time ETA clock (e.g. "ETA 21:24").
+ */
+fun calculateClockETA(minutesToGo: Int, now: LocalTime = LocalTime.now()): String {
+    if (minutesToGo <= 0) return "Arriving now"
+
+    // Adds the remaining minutes to the device's current local time
+    val etaTime = now.plusMinutes(minutesToGo.toLong())
+    val formatter = DateTimeFormatter.ofPattern("HH:mm")
+
+    return "ETA ${etaTime.format(formatter)}"
+}
 
 /** Geographic math helpers: dead-reckoning projection and great-circle distance. */
 object GeoMath {

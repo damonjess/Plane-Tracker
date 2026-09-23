@@ -7,6 +7,8 @@ import com.example.plane_tracker.data.AltitudeColors
 import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgressCalculator
+import com.example.plane_tracker.util.calculateClockETA
+import java.time.LocalTime
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -47,6 +49,15 @@ class GeoMathTest {
         val path = GeoMath.greatCirclePath(-0.5, 53.5, 45.0, 200.0)
         assertEquals(-0.5 to 53.5, path.first())
         assertEquals(6, path.size) // ~5 steps of 40km
+    }
+
+    @Test
+    fun `calculateClockETA formats clock time and arriving now correctly`() {
+        val now = LocalTime.of(21, 9)
+        assertEquals("ETA 21:24", calculateClockETA(15, now))
+        assertEquals("Arriving now", calculateClockETA(0, now))
+        assertEquals("Arriving now", calculateClockETA(-5, now))
+        assertEquals("ETA 22:09", calculateClockETA(60, now))
     }
 }
 
@@ -169,5 +180,36 @@ class RouteProgressTest {
     fun `missing airport coordinates yield null`() {
         val noCoords = Airport("Nowhere", "XXX", null, null, null)
         assertNull(RouteProgressCalculator.compute(aircraftAt(51.0, 0.0), noCoords, destination))
+    }
+}
+
+class AircraftClimbRateTest {
+
+    @Test
+    fun `descending plane has climbFpm under minus 300`() {
+        // -5 m/s vertical rate is approximately -984 ft/min
+        val descending = Aircraft(
+            icao24 = "abc123", callsign = "DESC1", longitude = -0.5, latitude = 53.5,
+            heading = 180f, altitudeMeters = 3000.0, velocityMps = 150.0,
+            verticalRateMps = -5.0, onGround = false
+        )
+        assertTrue(descending.climbFpm < -300)
+    }
+
+    @Test
+    fun `ADS-B 64 fpm quantization wobble stays above minus 300 threshold`() {
+        // ADS-B vertical rate is quantized in 64 fpm steps (~0.325 m/s)
+        val wobble = Aircraft(
+            icao24 = "abc124", callsign = "CRUISE1", longitude = -0.5, latitude = 53.5,
+            heading = 180f, altitudeMeters = 10000.0, velocityMps = 240.0,
+            verticalRateMps = -0.325, onGround = false // -64 fpm
+        )
+        assertTrue(wobble.climbFpm >= -300)
+
+        val level = wobble.copy(verticalRateMps = 0.0)
+        assertTrue(level.climbFpm >= -300)
+
+        val climbing = wobble.copy(verticalRateMps = 8.0)
+        assertTrue(climbing.climbFpm >= -300)
     }
 }

@@ -62,6 +62,7 @@ import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.Aircraft
 import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.util.RouteProgress
+import com.example.plane_tracker.util.calculateClockETA
 import com.example.plane_tracker.viewmodel.FilterState
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -426,8 +427,8 @@ fun FlightDetailsPanel(
                             "STATUS",
                             when {
                                 ac.onGround -> "On ground"
-                                ac.climbFpm > 50 -> "Climbing"
-                                ac.climbFpm < -50 -> "Descending"
+                                ac.climbFpm > 300 -> "Climbing"
+                                ac.climbFpm < -300 -> "Descending"
                                 else -> "Cruising"
                             },
                             Modifier.weight(1f)
@@ -580,8 +581,7 @@ private fun RouteStatsStrip(
             append("${progress.flownKm.roundToInt()} km flown")
             append("  ·  ${progress.remainingKm.roundToInt()} km to go")
             progress.etaMinutes?.let { mins ->
-                val etaStr = if (mins >= 60) "~${mins / 60}h ${mins % 60}m to arrival" else "~${mins}m to arrival"
-                append("  ·  $etaStr")
+                append("  ·  ${calculateClockETA(mins)}")
             }
         }
     } else {
