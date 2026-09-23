@@ -230,7 +230,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             }
             while (true) {
                 radarIndex = (radarIndex + 1) % uiState.radarFrames.size
-                delay(700)
+                delay(1200)
             }
         }
 

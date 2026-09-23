@@ -45,9 +45,9 @@ object AirportBoardBuilder {
         .map { it to (GeoMath.distanceMeters(airportLat, airportLon, it.latitude, it.longitude) / 1000.0) }
         .filter { it.second <= MAX_RADIUS_KM }
         .sortedBy { it.second }
-        .take(max)
         .map { it.first.callsign.trim().uppercase() }
         .distinct()
+        .take(max)
         .toList()
 
     fun build(
@@ -57,10 +57,13 @@ object AirportBoardBuilder {
         aircraft: List<Aircraft>,
         routesByCallsign: Map<String, RouteInfo?>,
     ): AirportBoard {
-        val entries = mutableListOf<BoardEntry>()
         val targetIata = airportIata.trim().uppercase()
+        if (targetIata.isEmpty()) {
+            return AirportBoard(airportIata, emptyList(), emptyList())
+        }
+        val entries = mutableListOf<BoardEntry>()
         for (ac in aircraft) {
-            if (ac.onGround) continue
+            if (ac.onGround || ac.latitude.isNaN() || ac.longitude.isNaN()) continue
             val cs = ac.callsign.trim().uppercase()
             val route = routesByCallsign[cs] ?: continue
             val distKm = GeoMath.distanceMeters(airportLat, airportLon, ac.latitude, ac.longitude) / 1000.0
@@ -72,8 +75,8 @@ object AirportBoardBuilder {
                 origIata == targetIata -> BoardKind.DEPARTURE
                 else -> continue
             }
-            val eta = if (kind == BoardKind.ARRIVAL && ac.velocityMps > 5.0 && !ac.velocityMps.isNaN()) {
-                (distKm / (ac.velocityMps * 3.6) * 60.0).roundToInt()
+            val eta = if ((kind == BoardKind.ARRIVAL) && (ac.velocityMps > 5.0) && !ac.velocityMps.isNaN()) {
+                ((distKm / (ac.velocityMps * 3.6)) * 60.0).roundToInt()
             } else null
             entries += BoardEntry(
                 aircraft = ac,
@@ -85,7 +88,7 @@ object AirportBoardBuilder {
             )
         }
         val sorted = entries.sortedWith(
-            compareBy({ it.etaMinutes ?: Int.MAX_VALUE }, { it.distanceKm })
+            compareBy({ it.etaMinutes ?: Int.MAX_VALUE }, { it.distanceKm }),
         )
         return AirportBoard(
             airportIata,

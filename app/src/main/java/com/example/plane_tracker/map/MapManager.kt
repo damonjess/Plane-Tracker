@@ -66,6 +66,9 @@ class MapManager(context: Context) {
     private lateinit var courseSource: GeoJsonSource
     private lateinit var emergencySource: GeoJsonSource
     private var radarUrl: String? = null
+    /** Ping-pong slot for smooth radar crossfades: 0 = layer-a, 1 = layer-b. */
+    private var radarSlot = 1
+    private var radarCleanup: Runnable? = null
 
     private var planeLayerIds: List<String> = emptyList()
 
@@ -371,41 +374,70 @@ class MapManager(context: Context) {
     }
 
     /**
-     * Swaps the radar overlay to a RainViewer tile URL. The raster source is
-     * rebuilt because RainViewer tile paths change every frame; the layer keeps
-     * its position at the bottom of the stack (above basemap, below planes).
+     * Swaps the radar overlay to a RainViewer tile URL using a two-slot
+     * crossfade: the new frame is added in the other slot on top with a
+     * raster fade-in while the old layer stays visible underneath, then the
+     * old layer is removed once the fade completes. No blank flash between
+     * frames.
      */
     fun updateRadarFrame(frame: RadarFrame?, visible: Boolean) {
         requireMain {
             val style = map?.style ?: return@requireMain
             if (frame == null) return@requireMain
-            if (frame.tileUrl == radarUrl && style.getLayer("radar-layer") != null) {
+            val visibility = if (visible) Property.VISIBLE else Property.NONE
+
+            val slot = if (radarSlot == 0) 1 else 0
+            val newSuffix = if (slot == 0) "a" else "b"
+            val oldSuffix = if (slot == 0) "b" else "a"
+            val srcId = "radar-source-$newSuffix"
+            val layerId = "radar-layer-$newSuffix"
+
+            // Same frame already shown and its layer still exists: just sync visibility.
+            if (frame.tileUrl == radarUrl && style.getLayer(layerId) != null) {
                 setRadarVisible(visible)
                 return@requireMain
             }
             radarUrl = frame.tileUrl
-            style.getLayer("radar-layer")?.let { style.removeLayer(it) }
-            style.getSource("radar-source")?.let { style.removeSource(it) }
+            radarSlot = slot
 
-            val tileSet = TileSet("2.1.0", frame.tileUrl)
-            style.addSource(RasterSource("radar-source", tileSet, 256))
+            // Cancel any pending removal so it can't hit the recycled slot.
+            radarCleanup?.let { mainHandler.removeCallbacks(it) }
 
-            val radarLayer = RasterLayer("radar-layer", "radar-source").withProperties(
+            // (Re)create this slot's source with the new tiles.
+            style.getLayer(layerId)?.let { style.removeLayer(it) }
+            style.getSource(srcId)?.let { style.removeSource(it) }
+            style.addSource(RasterSource(srcId, TileSet("2.1.0", frame.tileUrl), 256))
+
+            val layer = RasterLayer(layerId, srcId).withProperties(
                 PropertyFactory.rasterOpacity(0.55f),
-                PropertyFactory.visibility(if (visible) Property.VISIBLE else Property.NONE)
+                // Crossfade the new tiles in over the old layer as they load.
+                PropertyFactory.rasterFadeDuration(600f),
+                PropertyFactory.visibility(visibility)
             )
+            // Inserting below airports-circle also stacks it above the old radar
+            // layer (added earlier), so the fade reads as a true crossfade.
             if (style.getLayer("airports-circle") != null) {
-                style.addLayerBelow(radarLayer, "airports-circle")
+                style.addLayerBelow(layer, "airports-circle")
             } else {
-                style.addLayer(radarLayer)
+                style.addLayer(layer)
             }
+
+            // Retire the previous slot after the fade has finished.
+            radarCleanup = Runnable {
+                style.getLayer("radar-layer-$oldSuffix")?.let { style.removeLayer(it) }
+                style.getSource("radar-source-$oldSuffix")?.let { style.removeSource(it) }
+            }.also { mainHandler.postDelayed(it, 900) }
         }
     }
 
     fun setRadarVisible(visible: Boolean) {
         requireMain {
-            map?.style?.getLayer("radar-layer")?.setProperties(
-                PropertyFactory.visibility(if (visible) Property.VISIBLE else Property.NONE)
+            val visibility = if (visible) Property.VISIBLE else Property.NONE
+            map?.style?.getLayer("radar-layer-a")?.setProperties(
+                PropertyFactory.visibility(visibility)
+            )
+            map?.style?.getLayer("radar-layer-b")?.setProperties(
+                PropertyFactory.visibility(visibility)
             )
         }
     }

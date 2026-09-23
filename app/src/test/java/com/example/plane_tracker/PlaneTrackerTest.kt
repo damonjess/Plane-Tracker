@@ -5,7 +5,6 @@ import com.example.plane_tracker.data.Airport
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.AltitudeColors
 import com.example.plane_tracker.data.AirportBoardBuilder
-import com.example.plane_tracker.data.BoardKind
 import com.example.plane_tracker.data.EmergencyDetector
 import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.parseOpenSkyState
@@ -15,6 +14,7 @@ import com.example.plane_tracker.util.RouteProgressCalculator
 import com.example.plane_tracker.util.calculateClockETA
 import java.time.LocalTime
 import org.json.JSONArray
+import org.junit.Assert
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -230,6 +230,15 @@ class EmergencyDetectorTest {
     )
 
     @Test
+    fun `isEmergency identifies emergency squawks`() {
+        assertTrue(EmergencyDetector.isEmergency("7700"))
+        assertTrue(EmergencyDetector.isEmergency("7600"))
+        assertTrue(EmergencyDetector.isEmergency("7500"))
+        Assert.assertFalse(EmergencyDetector.isEmergency("1200"))
+        Assert.assertFalse(EmergencyDetector.isEmergency(null))
+    }
+
+    @Test
     fun `identifies all three emergency squawks`() {
         val events = EmergencyDetector.identify(
             listOf(ac("7700"), ac("7600", "hex2"), ac("7500", "hex3"))
@@ -317,18 +326,31 @@ class AirportBoardBuilderTest {
         val departure = board.departures[0]
         assertNull(departure.etaMinutes)
     }
+
+    @Test
+    fun `empty airport iata returns empty board`() {
+        val routes = mapOf("TST1" to route("", ""))
+        val board = AirportBoardBuilder.build(
+            "", ams.first, ams.second,
+            listOf(plane(52.0, 4.5, "TST1")),
+            routes
+        )
+        assertTrue(board.arrivals.isEmpty())
+        assertTrue(board.departures.isEmpty())
+    }
 }
 
 class RadarParserTest {
 
     @Test
     fun `parses past radar frames into tile urls`() {
-        val json = """{"host":"https://tilecache.rainviewer.com","radar":{"past":[
-            {"time":1790191800,"path":"/v2/radar/aaa"},
-            {"time":1790192400,"path":"/v2/radar/bbb"}
+        val json = """{"host":"https://tilecache.rainviewer.com/","radar":{"past":[
+            {"time":1790192400,"path":"/v2/radar/bbb"},
+            {"time":1790191800,"path":"v2/radar/aaa"}
         ]}}"""
         val frames = parseRadarMapsJson(json)
         assertEquals(2, frames.size)
+        // Sorted chronologically
         assertEquals(1790191800000L, frames[0].timeMs)
         assertEquals(
             "https://tilecache.rainviewer.com/v2/radar/aaa/256/{z}/{x}/{y}/2/1_1.png",

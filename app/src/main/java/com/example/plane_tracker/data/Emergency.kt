@@ -26,6 +26,7 @@ object EmergencyDetector {
 
     fun identify(aircraft: List<Aircraft>): List<EmergencyEvent> =
         aircraft.mapNotNull { ac ->
+            if (ac.latitude.isNaN() || ac.longitude.isNaN()) return@mapNotNull null
             val sq = ac.squawk?.trim() ?: return@mapNotNull null
             val label = SQUAWKS[sq] ?: return@mapNotNull null
             EmergencyEvent(

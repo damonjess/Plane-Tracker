@@ -24,6 +24,8 @@ data class RouteProgress(
 object RouteProgressCalculator {
 
     fun compute(aircraft: Aircraft, origin: Airport, destination: Airport): RouteProgress? {
+        if (aircraft.latitude.isNaN() || aircraft.longitude.isNaN()) return null
+
         val oLat = origin.latitude ?: return null
         val oLon = origin.longitude ?: return null
         val dLat = destination.latitude ?: return null
@@ -39,7 +41,7 @@ object RouteProgressCalculator {
         val fraction = if (rawFraction.isNaN()) 0f else rawFraction.coerceIn(0f, 1f)
 
         val speed = aircraft.velocityMps
-        val etaMinutes = if (aircraft.onGround || speed.isNaN() || speed < 20.0) {
+        val etaMinutes = if (aircraft.onGround || speed.isNaN() || (speed < 20.0)) {
             null // parked or too slow or invalid for a meaningful estimate
         } else {
             ((remainingM / speed) / 60.0).toInt()
