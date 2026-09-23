@@ -17,12 +17,16 @@ data class Aircraft(
     val squawk: String? = null,
     val registration: String? = null,
     val typeCode: String? = null,
+    /** adsb.lol database flags: bit 0 = military, bit 3 = LADD (privacy). */
+    val dbFlags: Int = 0,
     val lastSeen: Long = System.currentTimeMillis()
 ) {
     val altitudeFt: Int get() = (altitudeMeters * 3.28084).toInt()
     val speedKt: Int get() = (velocityMps * 1.94384).toInt()
     val speedKmh: Int get() = (velocityMps * 3.6).toInt()
     val climbFpm: Int get() = (verticalRateMps * 196.85).toInt()
+    val isMilitary: Boolean get() = (dbFlags and 0x1) != 0
+    val isLadd: Boolean get() = (dbFlags and 0x8) != 0
 }
 
 /** Aggregated live state for the map layer. */
@@ -73,7 +77,9 @@ data class SelectedFlight(
     val aircraft: Aircraft,
     val info: AircraftInfo? = null,
     val route: RouteInfo? = null,
-    val photoUrl: String? = null
+    val photoUrl: String? = null,
+    /** Blue-light / military classification for the badge, if any. */
+    val opsCategory: OpsCategory? = null
 )
 
 /** Parses an adsb.lol / tar1090-style aircraft object. */
@@ -99,7 +105,8 @@ fun parseAdsbAircraft(json: JSONObject): Aircraft? {
         onGround = json.optString("alt_baro", "").equals("ground", ignoreCase = true),
         squawk = json.optStringOrNull("squawk"),
         registration = json.optStringOrNull("r"),
-        typeCode = json.optStringOrNull("t")
+        typeCode = json.optStringOrNull("t"),
+        dbFlags = json.optInt("dbFlags", 0)
     )
 }
 

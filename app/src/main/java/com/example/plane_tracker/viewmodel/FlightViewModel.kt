@@ -8,6 +8,8 @@ import com.example.plane_tracker.data.AirportBoard
 import com.example.plane_tracker.data.AirportBoardBuilder
 import com.example.plane_tracker.data.EmergencyDetector
 import com.example.plane_tracker.data.EmergencyEvent
+import com.example.plane_tracker.data.OpsCategory
+import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.data.FlightRepository
 import com.example.plane_tracker.data.Metar
@@ -32,10 +34,12 @@ data class FilterState(
     val maxAltitudeFt: Int = 50_000,
     val showAirports: Boolean = true,
     val showLabels: Boolean = true,
-    val showTrail: Boolean = true
+    val showTrail: Boolean = true,
+    /** Show only blue-light aviation (coastguard, police, air ambulance, military). */
+    val showOnlyOps: Boolean = false
 ) {
     val isDefault: Boolean
-        get() = minAltitudeFt == 0 && maxAltitudeFt >= 50_000
+        get() = minAltitudeFt == 0 && maxAltitudeFt >= 50_000 && !showOnlyOps
 }
 
 /** Top-level UI state exposed to Compose. */
@@ -91,10 +95,20 @@ class FlightViewModel : ViewModel() {
     private val dismissedEmergencyHexes = mutableSetOf<String>()
     private var openAirportPageEntry: Airports.Entry? = null
 
+    /** Cached special-ops classification per hex (coastguard, police, military...). */
+    private val opsCategories = java.util.concurrent.ConcurrentHashMap<String, OpsCategory>()
+    /** Owner names fetched from adsbdb, cached per hex. */
+    private val ownerByHex = java.util.concurrent.ConcurrentHashMap<String, String>()
+    /** Hexes already attempted (including misses) to avoid repeat lookups. */
+    private val opsLookupAttempted = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    )
+
     init {
         startPolling()
         startFrameTicker()
         startRadarPolling()
+        startOpsLookupLoop()
     }
 
     private fun emptyCollection() = FeatureCollection.fromFeatures(emptyList<Feature>())
@@ -120,6 +134,50 @@ class FlightViewModel : ViewModel() {
                     _uiState.value = _uiState.value.copy(source = "offline")
                 }
                 delay(FLEET_POLL_MS)
+            }
+        }
+    }
+
+    /**
+     * Background loop: resolves adsbdb owner names for fleet aircraft we haven't
+     * classified yet, then caches their special-ops category. Rate-limited.
+     */
+    private fun startOpsLookupLoop() {
+        viewModelScope.launch {
+            while (true) {
+                val pending = engine.allAircraft(System.currentTimeMillis())
+                    .map { it.icao24 }
+                    .filter { !opsLookupAttempted.contains(it) }
+                    .take(20)
+                if (pending.isEmpty()) {
+                    delay(5_000)
+                } else {
+                    for (hex in pending) {
+                        opsLookupAttempted.add(hex)
+                        try {
+                            val info = repository.fetchAircraftInfo(hex)
+                            val owner = info?.registeredOwner
+                            if (owner != null) {
+                                ownerByHex[hex] = owner
+                            }
+                            val fleetAc = engine.aircraftByHex(hex)
+                            if (fleetAc != null) {
+                                OpsClassifier.classify(fleetAc, owner)?.let { cat ->
+                                    opsCategories[hex] = cat
+                                    // Refresh the badge if this plane is currently selected.
+                                    if (_uiState.value.selected?.aircraft?.icao24 == hex) {
+                                        _uiState.value = _uiState.value.copy(
+                                            selected = _uiState.value.selected?.copy(opsCategory = cat)
+                                        )
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) {
+                            // Classification is best-effort.
+                        }
+                        delay(120) // gentle on adsbdb
+                    }
+                }
             }
         }
     }
@@ -185,6 +243,9 @@ class FlightViewModel : ViewModel() {
                 val altFt = if (ac.onGround) 0 else ac.altitudeFt
                 altFt in filters.minAltitudeFt..filters.maxAltitudeFt
             }
+            .filter { ac ->
+                !filters.showOnlyOps || opsCategoryFor(ac) != null
+            }
             .map { ac -> buildFeature(ac) }
 
         // Trigger auto-tilt on transition to descent during live flight
@@ -233,6 +294,10 @@ class FlightViewModel : ViewModel() {
             "color",
             if (ac.onGround) "#b0bec5" else com.example.plane_tracker.data.AltitudeColors.forAltitude(ac.altitudeMeters)
         )
+        opsCategoryFor(ac)?.let {
+            feature.addStringProperty("ops", it.name)
+            feature.addStringProperty("opsRing", it.ringColor)
+        }
         return feature
     }
 
@@ -244,7 +309,7 @@ class FlightViewModel : ViewModel() {
 
         if (ac != null) {
             _uiState.value = _uiState.value.copy(
-                selected = SelectedFlight(ac),
+                selected = SelectedFlight(ac, opsCategory = opsCategoryFor(ac)),
                 routeProgress = null,
                 isLoadingDetails = true
             )
@@ -276,7 +341,8 @@ class FlightViewModel : ViewModel() {
             // Only apply if still selected.
             if (engine.selectedHex == hex) {
                 _uiState.value = _uiState.value.copy(
-                    selected = details, isLoadingDetails = false
+                    selected = details.copy(opsCategory = opsCategoryFor(details.aircraft)),
+                    isLoadingDetails = false
                 )
             }
         }
@@ -308,6 +374,17 @@ class FlightViewModel : ViewModel() {
     fun toggleAirports() = updateFilters { it.copy(showAirports = !it.showAirports) }
 
     fun toggleLabels() = updateFilters { it.copy(showLabels = !it.showLabels) }
+
+    fun toggleShowOnlyOps() = updateFilters { it.copy(showOnlyOps = !it.showOnlyOps) }
+
+    /** Live classification for the details panel badge. */
+    fun opsCategoryFor(ac: Aircraft): OpsCategory? =
+        opsCategories[ac.icao24] ?: OpsClassifier.classify(ac, ownerByHex[ac.icao24])
+
+    fun opsCategoryFor(hex: String): OpsCategory? {
+        val ac = engine.aircraftByHex(hex) ?: return opsCategories[hex]
+        return opsCategoryFor(ac)
+    }
 
     /** Hides an emergency banner; it returns if the aircraft squawks again later. */
     fun dismissEmergency(hex: String) {

@@ -10,6 +10,8 @@ import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.data.parseRadarMapsJson
 import com.example.plane_tracker.data.parseMetarJson
+import com.example.plane_tracker.data.OpsClassifier
+import com.example.plane_tracker.data.OpsCategory
 import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgressCalculator
@@ -18,6 +20,7 @@ import java.time.LocalTime
 import org.json.JSONArray
 import org.junit.Assert
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -412,5 +415,55 @@ class MetarTest {
     fun `emoji picks sun or moon for clear skies`() {
         val emoji = WeatherMapper.emoji("Clear")
         assertTrue(emoji == "☀️" || emoji == "🌙")
+    }
+}
+
+class OpsClassifierTest {
+
+    private fun ac(dbFlags: Int = 0) = Aircraft(
+        icao24 = "hex1", callsign = "TEST", longitude = -0.5, latitude = 53.5,
+        heading = 0f, altitudeMeters = 1000.0, velocityMps = 50.0,
+        verticalRateMps = 0.0, onGround = false, dbFlags = dbFlags
+    )
+
+    @Test
+    fun `coastguard owner classifies as coastguard`() {
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(ac(), "HM Coastguard"))
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(ac(), "Bristow Search and Rescue"))
+    }
+
+    @Test
+    fun `air ambulance and police owners classify`() {
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(ac(), "Wiltshire Air Ambulance"))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(ac(), "National Police Air Service"))
+    }
+
+    @Test
+    fun `military dbflag classifies when owner unknown`() {
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(ac(dbFlags = 1), null))
+    }
+
+    @Test
+    fun `us coast guard owner wins over military dbflag`() {
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(ac(dbFlags = 1), "US Coast Guard"))
+    }
+
+    @Test
+    fun `royal air force owner classifies as military`() {
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(ac(), "Royal Air Force"))
+    }
+
+    @Test
+    fun `civilian aircraft has no category`() {
+        assertNull(OpsClassifier.classify(ac(), "British Airways"))
+        assertNull(OpsClassifier.classify(ac(), null))
+    }
+
+    @Test
+    fun `dbflag bits decode military and ladd`() {
+        val ac = ac(dbFlags = 0b1001)
+        assertTrue(ac.isMilitary)
+        assertTrue(ac.isLadd)
+        assertFalse(ac(dbFlags = 0).isMilitary)
     }
 }

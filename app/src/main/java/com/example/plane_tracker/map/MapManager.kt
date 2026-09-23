@@ -220,6 +220,25 @@ class MapManager(context: Context) {
                 )
         )
 
+        // --- Special-ops rings (coastguard / police / air ambulance / military) ---
+        style.addLayer(
+            CircleLayer("ops-ring", "planes-source")
+                .withProperties(
+                    PropertyFactory.circleColor(Expression.get("opsRing")),
+                    PropertyFactory.circleOpacity(0.35f),
+                    PropertyFactory.circleRadius(
+                        Expression.interpolate(
+                            Expression.linear(), Expression.zoom(),
+                            Expression.stop(4.0, 8.0f), Expression.stop(10.0, 18.0f)
+                        )
+                    ),
+                    PropertyFactory.circleStrokeColor(Expression.get("opsRing")),
+                    PropertyFactory.circleStrokeWidth(1.5f),
+                    PropertyFactory.circleStrokeOpacity(0.85f)
+                )
+                .withFilter(Expression.has("opsRing"))
+        )
+
         // --- Plane layers: one per altitude color band + ground state ---
         val ids = mutableListOf<String>()
         AltitudeColors.allColors.forEach { color ->

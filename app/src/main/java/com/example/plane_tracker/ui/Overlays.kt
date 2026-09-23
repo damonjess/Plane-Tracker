@@ -69,6 +69,7 @@ import com.example.plane_tracker.data.BoardEntry
 import com.example.plane_tracker.data.BoardKind
 import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.Metar
+import com.example.plane_tracker.data.OpsCategory
 import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.data.SelectedFlight
@@ -523,7 +524,7 @@ fun AirportSheet(
 }
 
 @Composable
-private fun WxCell(label: String, value: String, emoji: String? = null, modifier: Modifier = Modifier) {
+private fun WxCell(label: String, value: String, modifier: Modifier = Modifier, emoji: String? = null) {
     Column(
         modifier = modifier
             .background(PanelBg, RoundedCornerShape(10.dp))
@@ -811,6 +812,14 @@ fun FlightDetailsPanel(
                             fontSize = 22.sp,
                             fontWeight = FontWeight.Bold
                         )
+                        selected.opsCategory?.let { ops ->
+                            Text(
+                                "${ops.emoji} ${ops.label}",
+                                color = Color(android.graphics.Color.parseColor(ops.ringColor)),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                         val route = selected.route?.routeLabel
                         val subtitle = buildString {
                             selected.info?.let { info ->
@@ -1113,6 +1122,27 @@ fun FilterSheet(
             FilterToggle("Show airports", filters.showAirports) { onChange(filters.copy(showAirports = it)) }
             FilterToggle("Show callsign labels", filters.showLabels) { onChange(filters.copy(showLabels = it)) }
             FilterToggle("Show flight trail", filters.showTrail) { onChange(filters.copy(showTrail = it)) }
+            FilterToggle("Only emergency services", filters.showOnlyOps) { onChange(filters.copy(showOnlyOps = it)) }
+
+            // Ops legend
+            AnimatedVisibility(visible = filters.showOnlyOps, enter = fadeIn(), exit = fadeOut()) {
+                Column(Modifier.padding(top = 8.dp)) {
+                    Text("Badge colours", color = TextSecondary, fontSize = 11.sp, letterSpacing = 1.sp)
+                    Spacer(Modifier.height(6.dp))
+                    OpsCategory.entries.forEach { cat ->
+                        Row(
+                            modifier = Modifier.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(cat.emoji, fontSize = 13.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Box(Modifier.size(10.dp).background(Color(android.graphics.Color.parseColor(cat.ringColor)), CircleShape))
+                            Spacer(Modifier.width(6.dp))
+                            Text(cat.label, color = TextPrimary, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
 
             Spacer(Modifier.height(12.dp))
             Text(
