@@ -29,7 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -38,7 +38,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.map.MapManager
 import com.example.plane_tracker.ui.AirportSheet
+import com.example.plane_tracker.ui.AlertHistorySheet
 import com.example.plane_tracker.ui.EmergencyBanner
+import com.example.plane_tracker.ui.OpsSheet
+import com.example.plane_tracker.ui.PlaybackSheet
 import com.example.plane_tracker.ui.FlightDetailsPanel
 import com.example.plane_tracker.ui.FilterSheet
 import com.example.plane_tracker.ui.FollowingChip
@@ -49,6 +52,8 @@ import com.example.plane_tracker.ui.StatusChip
 import com.example.plane_tracker.ui.theme.PlaneTrackerTheme
 import com.example.plane_tracker.viewmodel.FlightViewModel
 import org.maplibre.android.MapLibre
+import org.maplibre.geojson.LineString
+import org.maplibre.geojson.Point
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +78,8 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
     var filtersOpen by remember { mutableStateOf(false) }
     var is3D by remember { mutableStateOf(false) }
     var radarIndex by remember { mutableIntStateOf(0) }
+    var opsOpen by remember { mutableStateOf(false) }
+    var alertHistoryOpen by remember { mutableStateOf(false) }
 
     val uiState by viewModel.uiState.collectAsState()
 
@@ -109,6 +116,14 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
     LaunchedEffect(uiState.filters.showAirports, uiState.filters.showLabels) {
         mapManager.setAirportsVisible(uiState.filters.showAirports)
         mapManager.setLabelsVisible(uiState.filters.showLabels)
+    }
+
+    // Airport weather badges: push data + visibility
+    LaunchedEffect(uiState.airportWx) {
+        mapManager.updateAirportWx(uiState.airportWx)
+    }
+    LaunchedEffect(uiState.showAirportWx) {
+        mapManager.setAirportWxVisible(uiState.showAirportWx)
     }
 
     // Apply camera padding so selected aircraft center in open map space above details card
@@ -244,6 +259,21 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             mapManager.updateEmergencies(uiState.emergencies)
         }
 
+        // Sync flight replay track and active position to the map
+        LaunchedEffect(uiState.replayFlight, uiState.replayPoints, uiState.replayIndex) {
+            val flight = uiState.replayFlight
+            val points = uiState.replayPoints
+            val index = uiState.replayIndex
+            if (flight != null && points.isNotEmpty() && index in points.indices) {
+                val line = LineString.fromLngLats(points.map { Point.fromLngLat(it.longitude, it.latitude) })
+                val p = points[index]
+                val pt = Point.fromLngLat(p.longitude, p.latitude)
+                mapManager.updateReplay(line, pt)
+            } else {
+                mapManager.updateReplay(null, null)
+            }
+        }
+
         // Right-side controls
         MapControls(
             airportsOn = uiState.filters.showAirports,
@@ -257,6 +287,8 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             onToggleAirports = viewModel::toggleAirports,
             onToggleLabels = viewModel::toggleLabels,
             onToggleRadar = viewModel::toggleRadar,
+            onOpenOps = { opsOpen = true },
+            onOpenAlerts = { alertHistoryOpen = true },
             onOpenFilters = { filtersOpen = true },
             modifier = Modifier
                 .align(Alignment.CenterEnd)
@@ -273,6 +305,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                     isFollowing = uiState.isFollowing,
                     onClose = viewModel::clearSelection,
                     onToggleFollow = viewModel::toggleFollow,
+                    onReplay = {
+                        uiState.selected?.aircraft?.let { ac ->
+                            viewModel.openReplay(ac.icao24)
+                        }
+                    },
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
@@ -282,8 +319,51 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         FilterSheet(
             visible = filtersOpen,
             filters = uiState.filters,
+            showAirportWx = uiState.showAirportWx,
+            onToggleAirportWx = viewModel::toggleAirportWx,
             onChange = viewModel::setFilters,
             onDismiss = { filtersOpen = false }
+        )
+
+        // Emergency services & military list
+        if (opsOpen) {
+            OpsSheet(
+                ops = uiState.opsAircraft,
+                loading = uiState.isLoadingDetails,
+                onSelect = { ac ->
+                    opsOpen = false
+                    viewModel.focusSearchResult(
+                        ac,
+                        onFocused = { lat, lon -> mapManager.flyTo(lat, lon, 11.0) }
+                    )
+                },
+                onClose = { opsOpen = false }
+            )
+        }
+
+        // Squawk history (reviewable session log)
+        if (alertHistoryOpen) {
+            AlertHistorySheet(
+                entries = uiState.alertHistory,
+                onSelect = { e ->
+                    alertHistoryOpen = false
+                    mapManager.flyTo(e.latitude, e.longitude, 10.0)
+                    viewModel.selectAircraft(e.hex)
+                },
+                onClose = { alertHistoryOpen = false }
+            )
+        }
+
+        // Flight history playback
+        PlaybackSheet(
+            flight = uiState.replayFlight,
+            points = uiState.replayPoints,
+            index = uiState.replayIndex,
+            playing = uiState.replayPlaying,
+            onSeek = viewModel::seekReplay,
+            onPlay = viewModel::playReplay,
+            onPause = viewModel::pauseReplay,
+            onClose = viewModel::closeReplay
         )
 
         // FR24-style airport page (weather + boards + ground traffic)

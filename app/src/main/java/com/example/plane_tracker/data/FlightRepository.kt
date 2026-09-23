@@ -137,6 +137,29 @@ class FlightRepository {
         parseMetarJson(body)?.takeIf { it.icaoId.equals(icao, ignoreCase = true) }
     }
 
+    /**
+     * Batched METAR for up to ~40 airports in ONE request (comma-separated ids),
+     * so the map's airport weather badges cost one HTTP call per refresh.
+     */
+    suspend fun fetchMetarBatch(icaos: List<String>): Map<String, Metar> =
+        withContext(Dispatchers.IO) {
+            if (icaos.isEmpty()) return@withContext emptyMap()
+            val ids = icaos.take(40).joinToString(",")
+            val body = getBody("https://aviationweather.gov/api/data/metar?ids=$ids&format=json")
+                ?: return@withContext emptyMap()
+            try {
+                val arr = org.json.JSONArray(body)
+                val out = mutableMapOf<String, Metar>()
+                for (i in 0 until arr.length()) {
+                    val m = parseMetarObject(arr.getJSONObject(i))
+                    if (m != null) out[m.icaoId.uppercase()] = m
+                }
+                out
+            } catch (_: Exception) {
+                emptyMap()
+            }
+        }
+
     /** Resolves an aircraft photo from planespotters.net. */
     suspend fun fetchPhotoUrl(hex: String): String? = withContext(Dispatchers.IO) {
         if (hex.isBlank()) return@withContext null

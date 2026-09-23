@@ -1,7 +1,8 @@
 package com.example.plane_tracker.viewmodel
 
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import android.app.Application
 import com.example.plane_tracker.data.Aircraft
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.AirportBoard
@@ -20,6 +21,7 @@ import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.RouteProgressCalculator
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +30,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.Point
@@ -69,10 +72,23 @@ data class TrackerUiState(
     val airportMetar: Metar? = null,
     val airportBoard: AirportBoard? = null,
     val airportOnGround: List<Aircraft> = emptyList(),
-    val airportLoading: Boolean = false
+    val airportLoading: Boolean = false,
+    /** Past + ongoing emergency-squawk events (survives banner dismissal). */
+    val alertHistory: List<com.example.plane_tracker.data.EmergencyHistoryTracker.Entry> = emptyList(),
+    /** Currently-classified blue-light / military aircraft. */
+    val opsAircraft: List<Pair<Aircraft, OpsCategory>> = emptyList(),
+    /** METAR weather per airport ICAO for the map badges. */
+    val airportWx: Map<String, Metar> = emptyMap(),
+    /** Show tiny weather chips next to airport dots on the map. */
+    val showAirportWx: Boolean = false,
+    /** Flight replay state. */
+    val replayFlight: Aircraft? = null,
+    val replayPoints: List<com.example.plane_tracker.data.FlightHistoryStore.Point> = emptyList(),
+    val replayIndex: Int = 0,
+    val replayPlaying: Boolean = false
 )
 
-class FlightViewModel : ViewModel() {
+class FlightViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val FLEET_POLL_MS = 10_000L
@@ -83,6 +99,10 @@ class FlightViewModel : ViewModel() {
 
     private val repository = FlightRepository()
     private val engine = FlightEngine()
+
+    // --- Session + persistent history (feature: squawk history & 24h playback) ---
+    private val emergencyHistory = com.example.plane_tracker.data.EmergencyHistoryTracker()
+    private val historyStore = com.example.plane_tracker.data.FlightHistoryStore(application)
 
     private val _uiState = MutableStateFlow(TrackerUiState())
     val uiState: StateFlow<TrackerUiState> = _uiState.asStateFlow()
@@ -117,6 +137,8 @@ class FlightViewModel : ViewModel() {
         startFrameTicker()
         startRadarPolling()
         startOpsLookupLoop()
+        startAirportWxLoop()
+        startHistoryTrim()
     }
 
     private fun emptyCollection() = FeatureCollection.fromFeatures(emptyList<Feature>())
@@ -132,16 +154,63 @@ class FlightViewModel : ViewModel() {
                     val emergencies = EmergencyDetector.identify(state?.aircraft ?: emptyList())
                     // Forgive dismissals once the event is gone so a new squawk alerts again.
                     dismissedEmergencyHexes.removeAll { hex -> emergencies.none { it.hex == hex } }
+                    // Record into session history (keeps ended events for review).
+                    emergencyHistory.update(emergencies)
+                    // Persist positions for 24h playback on IO dispatcher.
+                    state?.aircraft?.let { acList ->
+                        withContext(Dispatchers.IO) {
+                            historyStore.insertAll(acList)
+                        }
+                    }
+                    // Recompute the ops aircraft list.
+                    val ops = state?.aircraft.orEmpty()
+                        .mapNotNull { ac -> opsCategoryFor(ac)?.let { ac to it } }
+                        .sortedBy { it.second.ordinal }
                     _uiState.value = _uiState.value.copy(
                         aircraftCount = state?.aircraft?.size ?: 0,
                         source = state?.source ?: "offline",
                         lastUpdateMs = state?.fetchedAt ?: 0L,
-                        emergencies = emergencies.filter { it.hex !in dismissedEmergencyHexes }
+                        emergencies = emergencies.filter { it.hex !in dismissedEmergencyHexes },
+                        alertHistory = emergencyHistory.all(),
+                        opsAircraft = ops
                     )
                 } catch (e: Exception) {
                     _uiState.value = _uiState.value.copy(source = "offline")
                 }
                 delay(FLEET_POLL_MS)
+            }
+        }
+    }
+
+    /** Refreshes airport weather badges every 10 minutes (one batched request). */
+    private fun startAirportWxLoop() {
+        viewModelScope.launch {
+            while (true) {
+                try {
+                    val icaos = Airports.byCode.values.map { it.icao }
+                    val wx = repository.fetchMetarBatch(icaos)
+                    if (wx.isNotEmpty()) {
+                        _uiState.value = _uiState.value.copy(airportWx = wx)
+                    }
+                } catch (_: Exception) {
+                    // Badges are best-effort.
+                }
+                delay(10 * 60_000L)
+            }
+        }
+    }
+
+    /** Trims the SQLite history daily-bounded; runs every 30 min. */
+    private fun startHistoryTrim() {
+        viewModelScope.launch {
+            while (true) {
+                delay(30 * 60_000L)
+                try {
+                    withContext(Dispatchers.IO) {
+                        historyStore.trimOld()
+                    }
+                } catch (_: Exception) {
+                }
             }
         }
     }
@@ -385,6 +454,10 @@ class FlightViewModel : ViewModel() {
 
     fun toggleShowOnlyOps() = updateFilters { it.copy(showOnlyOps = !it.showOnlyOps) }
 
+    fun toggleAirportWx() {
+        _uiState.value = _uiState.value.copy(showAirportWx = !_uiState.value.showAirportWx)
+    }
+
     /** Live classification for the details panel badge. */
     fun opsCategoryFor(ac: Aircraft): OpsCategory? =
         opsCategories[ac.icao24] ?: OpsClassifier.classify(ac, ownerByHex[ac.icao24])
@@ -570,5 +643,74 @@ class FlightViewModel : ViewModel() {
         val entry = Airports.byIata(iata) ?: return false
         onFocused(entry.lat, entry.lon)
         return true
+    }
+
+    // ---------- Flight history playback ----------
+
+    private var replayJob: kotlinx.coroutines.Job? = null
+
+    /** Opens the replay sheet for an aircraft: loads its recorded track. */
+    fun openReplay(hex: String, onLoaded: (Int) -> Unit = {}) {
+        replayJob?.cancel()
+        viewModelScope.launch {
+            val ac = engine.aircraftByHex(hex)
+            val points = withContext(Dispatchers.IO) {
+                historyStore.trackFor(hex, hours = 2)
+            }
+            if (points.isEmpty()) {
+                _uiState.value = _uiState.value.copy(
+                    replayFlight = ac, replayPoints = emptyList(),
+                    replayIndex = 0, replayPlaying = false
+                )
+                onLoaded(0)
+                return@launch
+            }
+            _uiState.value = _uiState.value.copy(
+                replayFlight = ac,
+                replayPoints = points,
+                replayIndex = 0,
+                replayPlaying = false
+            )
+            onLoaded(points.size)
+        }
+    }
+
+    fun closeReplay() {
+        replayJob?.cancel()
+        _uiState.value = _uiState.value.copy(
+            replayFlight = null, replayPoints = emptyList(),
+            replayIndex = 0, replayPlaying = false
+        )
+    }
+
+    fun seekReplay(index: Int) {
+        val points = _uiState.value.replayPoints
+        if (points.isEmpty()) return
+        _uiState.value = _uiState.value.copy(
+            replayIndex = index.coerceIn(0, points.lastIndex),
+            replayPlaying = false
+        )
+    }
+
+    /** Plays the recorded track, animating position along the stored samples. */
+    fun playReplay() {
+        val points = _uiState.value.replayPoints
+        if (points.isEmpty()) return
+        _uiState.value = _uiState.value.copy(replayPlaying = true)
+        replayJob?.cancel()
+        replayJob = viewModelScope.launch {
+            val start = _uiState.value.replayIndex
+            for (i in start until points.size) {
+                if (!_uiState.value.replayPlaying) break
+                _uiState.value = _uiState.value.copy(replayIndex = i)
+                delay(400)
+            }
+            _uiState.value = _uiState.value.copy(replayPlaying = false)
+        }
+    }
+
+    fun pauseReplay() {
+        replayJob?.cancel()
+        _uiState.value = _uiState.value.copy(replayPlaying = false)
     }
 }

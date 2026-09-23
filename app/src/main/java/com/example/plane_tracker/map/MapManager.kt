@@ -35,6 +35,7 @@ import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
+import kotlin.math.roundToInt
 
 /**
  * Owns the MapLibre map and all flight-related layers.
@@ -59,6 +60,8 @@ class MapManager(context: Context) {
     private var map: MapLibreMap? = null
     private var styleReady = false
     private val iconIds = mutableSetOf<String>()
+    /** Which ops badge images have been added to the style. */
+    private val badgeIds = mutableSetOf<String>()
 
     private lateinit var planesSource: GeoJsonSource
     private lateinit var selectedSource: GeoJsonSource
@@ -288,6 +291,50 @@ class MapManager(context: Context) {
                     Expression.neq(Expression.get("callsign"), Expression.literal(""))
                 )
         )
+
+        // --- Ops badges: category emoji next to classified aircraft ---
+        com.example.plane_tracker.data.OpsCategory.entries.forEach { cat ->
+            val badgeId = "badge-${cat.name}"
+            style.addImage(badgeId, createBadgeBitmap(cat.emoji, cat.ringColor))
+            badgeIds.add(badgeId)
+        }
+        style.addLayer(
+            SymbolLayer("ops-badges", "planes-source")
+                .withProperties(
+                    PropertyFactory.iconImage(
+                        Expression.concat(
+                            Expression.literal("badge-"),
+                            Expression.get("ops")
+                        )
+                    ),
+                    PropertyFactory.iconSize(0.9f),
+                    PropertyFactory.iconAllowOverlap(true),
+                    PropertyFactory.iconIgnorePlacement(true),
+                    PropertyFactory.iconOffset(arrayOf(-1.4f, -1.4f)),
+                    PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT)
+                )
+                .withFilter(Expression.has("ops"))
+        )
+
+        // --- Airport weather chips (IATA + condition, toggleable) ---
+        style.addLayer(
+            SymbolLayer("airport-wx", "airports-source")
+                .withProperties(
+                    PropertyFactory.textField(
+                        Expression.concat(
+                            Expression.get("iata"),
+                            Expression.get("wxLabel")
+                        )
+                    ),
+                    PropertyFactory.textSize(9f),
+                    PropertyFactory.textColor("#a5d8ff"),
+                    PropertyFactory.textHaloColor("#0b0f14"),
+                    PropertyFactory.textHaloWidth(1.2f),
+                    PropertyFactory.textOffset(arrayOf(0f, 2.2f)),
+                    PropertyFactory.textAllowOverlap(true),
+                    PropertyFactory.visibility(Property.NONE)
+                )
+        )
     }
 
     private fun handleTap(point: LatLng) {
@@ -481,6 +528,64 @@ class MapManager(context: Context) {
 
     fun setLabelsVisible(visible: Boolean) = setLayerVisible("plane-labels", visible)
 
+    /** Pushes airport weather labels ("MAN 9°C") onto the airport layer. */
+    fun updateAirportWx(wx: Map<String, com.example.plane_tracker.data.Metar>) {
+        requireMain {
+            if (!styleReady) return@requireMain
+            val features = Airports.byCode.values.map { entry ->
+                val f = Feature.fromGeometry(Point.fromLngLat(entry.lon, entry.lat))
+                f.addStringProperty("iata", entry.iata)
+                val label = wx[entry.icao.uppercase()]?.tempC?.let { c -> " ${c.roundToInt()}°" } ?: ""
+                f.addStringProperty("wxLabel", label)
+                f
+            }
+            (map?.style?.getSource("airports-source") as? GeoJsonSource)?.setGeoJson(
+                FeatureCollection.fromFeatures(features)
+            )
+        }
+    }
+
+    fun setAirportWxVisible(visible: Boolean) {
+        setLayerVisible("airport-wx", visible)
+    }
+
+    /** Draws the replay path + moving plane position. */
+    fun updateReplay(path: LineString?, position: Point?) {
+        requireMain {
+            if (!styleReady) return@requireMain
+            val style = map?.style ?: return@requireMain
+            if (style.getSource("replay-source") == null) {
+                style.addSource(GeoJsonSource("replay-source"))
+                style.addLayerBelow(
+                    LineLayer("replay-line", "replay-source")
+                        .withProperties(
+                            PropertyFactory.lineColor("#4dd0e1"),
+                            PropertyFactory.lineWidth(3f),
+                            PropertyFactory.lineOpacity(0.9f)
+                        ),
+                    "selected-ring"
+                )
+                style.addLayer(
+                    CircleLayer("replay-dot", "replay-source")
+                        .withProperties(
+                            PropertyFactory.circleColor("#4dd0e1"),
+                            PropertyFactory.circleRadius(6f),
+                            PropertyFactory.circleStrokeColor("#ffffff"),
+                            PropertyFactory.circleStrokeWidth(2f)
+                        )
+                        .withFilter(Expression.eq(
+                            Expression.geometryType(), Expression.literal("Point")
+                        ))
+                )
+            }
+            val src = style.getSource("replay-source") as? GeoJsonSource ?: return@requireMain
+            val features = mutableListOf<Feature>()
+            if (path != null) features.add(Feature.fromGeometry(path))
+            if (position != null) features.add(Feature.fromGeometry(position))
+            src.setGeoJson(FeatureCollection.fromFeatures(features))
+        }
+    }
+
     fun setTrailVisible(visible: Boolean) {
         setLayerVisible("trail-line", visible)
         setLayerVisible("course-line", visible)
@@ -589,6 +694,34 @@ class MapManager(context: Context) {
     }
 
     enum class LifecycleEvent { START, RESUME, PAUSE, STOP, DESTROY }
+}
+
+/** Renders a small rounded badge with an emoji + colored ring. */
+fun createBadgeBitmap(emoji: String, ringColor: String): Bitmap {
+    val size = 44
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val ring = Paint().apply {
+        color = AndroidColor.parseColor(ringColor)
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        isAntiAlias = true
+    }
+    val bg = Paint().apply {
+        color = AndroidColor.parseColor("#EE10141A")
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, bg)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, ring)
+    val text = Paint().apply {
+        textAlign = Paint.Align.CENTER
+        textSize = 20f
+        isAntiAlias = true
+    }
+    val y = size / 2f - (text.descent() + text.ascent()) / 2f
+    canvas.drawText(emoji, size / 2f, y, text)
+    return bitmap
 }
 
 /** Renders the FR24-style plane silhouette in the given color. */

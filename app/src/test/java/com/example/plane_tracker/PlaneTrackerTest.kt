@@ -10,6 +10,8 @@ import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.data.parseRadarMapsJson
 import com.example.plane_tracker.data.parseMetarJson
+import com.example.plane_tracker.data.EmergencyHistoryTracker
+import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.OpsCategory
 import com.example.plane_tracker.data.WeatherMapper
@@ -466,5 +468,60 @@ class OpsClassifierTest {
         assertTrue(ac.isMilitary)
         assertTrue(ac.isLadd)
         assertFalse(ac(dbFlags = 0).isMilitary)
+    }
+}
+
+class EmergencyHistoryTrackerTest {
+
+    private fun event(hex: String, squawk: String = "7700") = EmergencyEvent(
+        hex = hex, callsign = "ALERT$squawk", squawk = squawk,
+        label = EmergencyDetector.SQUAWKS[squawk] ?: "Emergency",
+        latitude = 53.0, longitude = -0.5, atMs = 1000L
+    )
+
+    @Test
+    fun `ended events stay in history marked inactive`() {
+        val tracker = EmergencyHistoryTracker()
+        tracker.update(listOf(event("hex1")), now = 1000L)
+        tracker.update(emptyList(), now = 2000L)
+        val all = tracker.all()
+        assertEquals(1, all.size)
+        assertFalse(all[0].active)
+        assertEquals(1000L, all[0].firstSeenMs)
+        assertEquals(2000L, all[0].lastSeenMs)
+    }
+
+    @Test
+    fun `ongoing event keeps original first seen`() {
+        val tracker = EmergencyHistoryTracker()
+        tracker.update(listOf(event("hex1")), now = 1000L)
+        tracker.update(listOf(event("hex1")), now = 5000L)
+        val all = tracker.all()
+        assertEquals(1, all.size)
+        assertTrue(all[0].active)
+        assertEquals(1000L, all[0].firstSeenMs)
+        assertEquals(5000L, all[0].lastSeenMs)
+    }
+
+    @Test
+    fun `most recent events first and bounded at 50`() {
+        val tracker = EmergencyHistoryTracker()
+        repeat(60) { i ->
+            tracker.update(listOf(event("hex$i")), now = i * 1000L)
+        }
+        val all = tracker.all()
+        assertEquals(50, all.size)
+        assertEquals("hex59", all[0].hex)
+    }
+
+    @Test
+    fun `reactivated event flips back to active`() {
+        val tracker = EmergencyHistoryTracker()
+        tracker.update(listOf(event("hex1")), now = 1000L)
+        tracker.update(emptyList(), now = 2000L)
+        tracker.update(listOf(event("hex1")), now = 3000L)
+        val all = tracker.all()
+        assertEquals(1, all.size)
+        assertTrue(all[0].active)
     }
 }

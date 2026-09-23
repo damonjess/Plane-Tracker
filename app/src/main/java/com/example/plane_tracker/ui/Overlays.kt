@@ -38,9 +38,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.RangeSlider
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -68,8 +68,11 @@ import com.example.plane_tracker.data.AirportBoard
 import com.example.plane_tracker.data.BoardEntry
 import com.example.plane_tracker.data.BoardKind
 import com.example.plane_tracker.data.EmergencyEvent
+import com.example.plane_tracker.data.EmergencyHistoryTracker
+import com.example.plane_tracker.data.FlightHistoryStore
 import com.example.plane_tracker.data.Metar
 import com.example.plane_tracker.data.OpsCategory
+import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.data.SelectedFlight
@@ -341,6 +344,235 @@ fun RadarOverlay(
                     Text(formatRadarTime(it.timeMs), color = TextSecondary, fontSize = 11.sp)
                 }
             }
+        }
+    }
+}
+
+// ---------- Ops aircraft list ----------
+
+/** Sheet listing every currently-tracked blue-light / military aircraft. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun OpsSheet(
+    ops: List<Pair<Aircraft, OpsCategory>>,
+    loading: Boolean,
+    onSelect: (Aircraft) -> Unit,
+    onClose: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        containerColor = PanelBgLight,
+        contentColor = TextPrimary
+    ) {
+        Column(
+            Modifier
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+        ) {
+            Text("Emergency services & military", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+            Text(
+                "${ops.size} tracked aircraft in coverage",
+                color = TextSecondary, fontSize = 12.sp
+            )
+            Spacer(Modifier.height(12.dp))
+            if (ops.isEmpty()) {
+                Text(
+                    if (loading) "Scanning…" else "None in range right now.",
+                    color = TextSecondary, fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 16.dp)
+                )
+            } else {
+                LazyColumn(modifier = Modifier.height((56 * ops.size.coerceAtMost(8)).dp)) {
+                    items(ops, key = { "ops-${it.first.icao24}" }) { (ac, cat) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(ac) }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(34.dp)
+                                    .background(
+                                        Color(android.graphics.Color.parseColor(cat.ringColor)).copy(alpha = 0.18f),
+                                        CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(cat.emoji, fontSize = 15.sp)
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    ac.callsign.ifEmpty { ac.icao24.uppercase() },
+                                    color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    listOfNotNull(
+                                        cat.label,
+                                        ac.typeCode,
+                                        ac.registration,
+                                        formatAltitudeFt(if (ac.onGround) 0 else ac.altitudeFt)
+                                    ).joinToString(" · "),
+                                    color = TextSecondary, fontSize = 11.sp, maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+// ---------- Alert history ----------
+
+private fun formatAlertTime(ms: Long): String =
+    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(ms))
+
+/** Reviewable list of emergency-squawk events from this session. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AlertHistorySheet(
+    entries: List<EmergencyHistoryTracker.Entry>,
+    onSelect: (EmergencyHistoryTracker.Entry) -> Unit,
+    onClose: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        containerColor = PanelBgLight,
+        contentColor = TextPrimary
+    ) {
+        Column(
+            Modifier
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+        ) {
+            Text("Squawk history", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+            Text(
+                "${entries.count { it.active }} ongoing · ${entries.size} this session",
+                color = TextSecondary, fontSize = 12.sp
+            )
+            Spacer(Modifier.height(12.dp))
+            if (entries.isEmpty()) {
+                Text(
+                    "No emergency squawks detected yet. When an aircraft squawks 7700, 7600 or 7500 it will be recorded here.",
+                    color = TextSecondary, fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 16.dp)
+                )
+            } else {
+                LazyColumn(modifier = Modifier.height((64 * entries.size.coerceAtMost(8)).dp)) {
+                    items(entries, key = { "alert-${it.hex}-${it.firstSeenMs}" }) { e ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(e) }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(10.dp)
+                                    .background(
+                                        if (e.active) AlertRed else TextSecondary.copy(alpha = 0.5f),
+                                        CircleShape
+                                    )
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "Squawk ${e.squawk} · ${e.label}",
+                                    color = if (e.active) AlertRed else TextPrimary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "${e.callsign} · ${formatAlertTime(e.firstSeenMs)}" +
+                                        if (!e.active) " – ${formatAlertTime(e.lastSeenMs)}" else " · ongoing",
+                                    color = TextSecondary, fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+// ---------- Flight replay ----------
+
+/** Scrubber sheet for replaying a recorded flight track. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PlaybackSheet(
+    flight: Aircraft?,
+    points: List<FlightHistoryStore.Point>,
+    index: Int,
+    playing: Boolean,
+    onSeek: (Int) -> Unit,
+    onPlay: () -> Unit,
+    onPause: () -> Unit,
+    onClose: () -> Unit
+) {
+    if (flight == null) return
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        containerColor = PanelBgLight,
+        contentColor = TextPrimary
+    ) {
+        Column(
+            Modifier
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+        ) {
+            Text(
+                flight.callsign.ifEmpty { flight.icao24.uppercase() },
+                fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary
+            )
+            Text(
+                if (points.isEmpty()) "No recording yet — the app stores ~90 minutes per flight."
+                else "${points.size} recorded positions · ${formatAlertTime(points.first().ts)} – ${formatAlertTime(points.last().ts)}",
+                color = TextSecondary, fontSize = 12.sp
+            )
+            Spacer(Modifier.height(12.dp))
+
+            val point = points.getOrNull(index)
+            point?.let {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    DataCell("ALTITUDE", formatAltitudeFt((it.altitudeMeters * 3.28084).toInt()))
+                    DataCell("SPEED", formatSpeedKt((it.velocityMps * 1.94384).toInt()))
+                    DataCell("TIME", formatAlertTime(it.ts))
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+
+            if (points.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (playing) "⏸" else "▶",
+                        color = Accent, fontSize = 18.sp,
+                        modifier = Modifier
+                            .clickable { if (playing) onPause() else onPlay() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                    androidx.compose.material3.Slider(
+                        value = index.toFloat(),
+                        onValueChange = { onSeek(it.roundToInt()) },
+                        valueRange = 0f..maxOf(1f, points.lastIndex.toFloat()),
+                        modifier = Modifier.weight(1f),
+                        colors = androidx.compose.material3.SliderDefaults.colors(
+                            thumbColor = Accent,
+                            activeTrackColor = Accent,
+                            inactiveTrackColor = TextSecondary.copy(alpha = 0.3f)
+                        )
+                    )
+                }
+            }
+            Spacer(Modifier.height(20.dp))
         }
     }
 }
@@ -688,6 +920,8 @@ fun MapControls(
     onToggleAirports: () -> Unit,
     onToggleLabels: () -> Unit,
     onToggleRadar: () -> Unit,
+    onOpenOps: () -> Unit,
+    onOpenAlerts: () -> Unit,
     onOpenFilters: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -703,6 +937,8 @@ fun MapControls(
         ControlButton("RAD", "Rain radar", onToggleRadar, active = radarOn)
         ControlButton("AP", "Airports", onToggleAirports, active = airportsOn)
         ControlButton("AB", "Callsigns", onToggleLabels, active = labelsOn)
+        ControlButton("🚁", "Emergency services & military", onOpenOps)
+        ControlButton("⏱", "Squawk history", onOpenAlerts)
         ControlButton("☰", "Filters", onOpenFilters)
     }
 }
@@ -764,6 +1000,7 @@ fun FlightDetailsPanel(
     isFollowing: Boolean,
     onClose: () -> Unit,
     onToggleFollow: () -> Unit,
+    onReplay: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val ac = selected.aircraft
@@ -844,6 +1081,10 @@ fun FlightDetailsPanel(
                             contentDescription = if (isFollowing) "Stop following" else "Follow aircraft",
                             tint = if (isFollowing) Accent else TextSecondary
                         )
+                    }
+                    // Flight history replay
+                    IconButton(onClick = onReplay) {
+                        Text("⏱", color = TextSecondary, fontSize = 16.sp)
                     }
                     IconButton(onClick = onClose) {
                         Icon(Icons.Filled.Close, contentDescription = "Close", tint = TextSecondary)
@@ -1079,6 +1320,8 @@ private fun RouteStatsStrip(
 fun FilterSheet(
     visible: Boolean,
     filters: FilterState,
+    showAirportWx: Boolean,
+    onToggleAirportWx: () -> Unit,
     onChange: (FilterState) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1123,6 +1366,7 @@ fun FilterSheet(
             FilterToggle("Show callsign labels", filters.showLabels) { onChange(filters.copy(showLabels = it)) }
             FilterToggle("Show flight trail", filters.showTrail) { onChange(filters.copy(showTrail = it)) }
             FilterToggle("Only emergency services", filters.showOnlyOps) { onChange(filters.copy(showOnlyOps = it)) }
+            FilterToggle("Airport weather chips", showAirportWx) { onToggleAirportWx() }
 
             // Ops legend
             AnimatedVisibility(visible = filters.showOnlyOps, enter = fadeIn(), exit = fadeOut()) {

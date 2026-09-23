@@ -24,20 +24,24 @@ data class Metar(
 /** Parses aviationweather.gov's JSON METAR array (takes the first report). */
 fun parseMetarJson(body: String): Metar? = try {
     val arr = JSONArray(body)
-    if (arr.length() == 0) null else {
-        val o = arr.getJSONObject(0)
-        Metar(
-            icaoId = o.optString("icaoId", ""),
-            rawOb = o.optString("rawOb", ""),
-            reportTimeMs = o.optLong("obsTime", 0L).takeIf { it > 0L }?.times(1000L),
-            tempC = o.optDoubleOrNull("temp"),
-            dewpointC = o.optDoubleOrNull("dewp"),
-            windFromDeg = o.optIntOrNull("wdir"),
-            windSpeedKt = o.optIntOrNull("wspd"),
-            visibility = o.optStringOrNull("visib"),
-            altimHpa = o.optIntOrNull("altim")?.takeIf { it > 0 },
-        )
-    }
+    if (arr.length() == 0) null else parseMetarObject(arr.getJSONObject(0))
+} catch (_: Exception) {
+    null
+}
+
+/** Parses one METAR report object. */
+fun parseMetarObject(o: JSONObject): Metar? = try {
+    Metar(
+        icaoId = o.optString("icaoId", ""),
+        rawOb = o.optString("rawOb", ""),
+        reportTimeMs = o.optLong("obsTime", 0L).takeIf { it > 0L }?.times(1000L),
+        tempC = o.optDoubleOrNull("temp"),
+        dewpointC = o.optDoubleOrNull("dewp"),
+        windFromDeg = o.optIntOrNull("wdir"),
+        windSpeedKt = o.optIntOrNull("wspd"),
+        visibility = o.optStringOrNull("visib"),
+        altimHpa = o.optIntOrNull("altim")?.takeIf { it > 0 },
+    )
 } catch (_: Exception) {
     null
 }
