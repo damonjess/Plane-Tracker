@@ -10,9 +10,11 @@ import com.example.plane_tracker.data.EmergencyDetector
 import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.data.FlightRepository
+import com.example.plane_tracker.data.Metar
 import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.data.MapFrame
 import com.example.plane_tracker.data.RadarFrame
+import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.RouteProgressCalculator
 import kotlinx.coroutines.delay
@@ -54,10 +56,12 @@ data class TrackerUiState(
     val radarOn: Boolean = false,
     val radarPlaying: Boolean = true,
     val radarFrames: List<RadarFrame> = emptyList(),
-    /** Airport arrivals/departures board. */
-    val boardAirport: Airports.Entry? = null,
-    val board: AirportBoard? = null,
-    val boardLoading: Boolean = false
+    /** Full airport page (FR24-style). */
+    val airportPage: Airports.Entry? = null,
+    val airportMetar: Metar? = null,
+    val airportBoard: AirportBoard? = null,
+    val airportOnGround: List<Aircraft> = emptyList(),
+    val airportLoading: Boolean = false
 )
 
 class FlightViewModel : ViewModel() {
@@ -85,7 +89,7 @@ class FlightViewModel : ViewModel() {
     private var lastSelectedWasDescending = false
 
     private val dismissedEmergencyHexes = mutableSetOf<String>()
-    private var openBoardAirport: Airports.Entry? = null
+    private var openAirportPageEntry: Airports.Entry? = null
 
     init {
         startPolling()
@@ -321,14 +325,25 @@ class FlightViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(radarPlaying = !_uiState.value.radarPlaying)
     }
 
-    /** Opens the arrivals/departures board for an airport, resolving routes live. */
-    fun openAirportBoard(entry: Airports.Entry) {
-        openBoardAirport = entry
+    /** Opens the FR24-style airport page: weather + live boards + ground traffic. */
+    fun openAirportPage(entry: Airports.Entry) {
+        openAirportPageEntry = entry
         _uiState.value = _uiState.value.copy(
-            boardAirport = entry, board = null, boardLoading = true
+            airportPage = entry,
+            airportMetar = null,
+            airportBoard = null,
+            airportOnGround = emptyList(),
+            airportLoading = true
         )
         viewModelScope.launch {
             try {
+                // METAR weather (best-effort, never blocks the page).
+                val metar = try {
+                    repository.fetchMetar(entry.icao)
+                } catch (_: Exception) {
+                    null
+                }
+                // Live departures/arrivals + on-ground traffic.
                 val aircraft = engine.allAircraft(System.currentTimeMillis())
                 val candidates = AirportBoardBuilder.candidateCallsigns(entry.lat, entry.lon, aircraft)
                 val routes = candidates.associateWith { cs ->
@@ -338,28 +353,35 @@ class FlightViewModel : ViewModel() {
                         null
                     }
                 }
-                val board = AirportBoardBuilder.build(
-                    entry.iata, entry.lat, entry.lon, aircraft, routes
-                )
-                // Only apply if this airport is still the open one.
-                if (openBoardAirport == entry) {
-                    _uiState.value = _uiState.value.copy(board = board, boardLoading = false)
+                val board = AirportBoardBuilder.build(entry.iata, entry.lat, entry.lon, aircraft, routes)
+                val onGround = aircraft.filter {
+                    it.onGround && !it.latitude.isNaN() && !it.longitude.isNaN() &&
+                        GeoMath.distanceMeters(entry.lat, entry.lon, it.latitude, it.longitude) < 15_000
+                }
+                if (openAirportPageEntry == entry) {
+                    _uiState.value = _uiState.value.copy(
+                        airportMetar = metar,
+                        airportBoard = board,
+                        airportOnGround = onGround,
+                        airportLoading = false
+                    )
                 }
             } catch (_: Exception) {
-                if (openBoardAirport == entry) {
+                if (openAirportPageEntry == entry) {
                     _uiState.value = _uiState.value.copy(
-                        board = AirportBoard(entry.iata, emptyList(), emptyList()),
-                        boardLoading = false
+                        airportBoard = AirportBoard(entry.iata, emptyList(), emptyList()),
+                        airportLoading = false
                     )
                 }
             }
         }
     }
 
-    fun closeAirportBoard() {
-        openBoardAirport = null
+    fun closeAirportPage() {
+        openAirportPageEntry = null
         _uiState.value = _uiState.value.copy(
-            boardAirport = null, board = null, boardLoading = false
+            airportPage = null, airportMetar = null, airportBoard = null,
+            airportOnGround = emptyList(), airportLoading = false
         )
     }
 

@@ -9,6 +9,8 @@ import com.example.plane_tracker.data.EmergencyDetector
 import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.data.parseRadarMapsJson
+import com.example.plane_tracker.data.parseMetarJson
+import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgressCalculator
 import com.example.plane_tracker.util.calculateClockETA
@@ -361,5 +363,54 @@ class RadarParserTest {
     @Test
     fun `malformed json yields empty list`() {
         assertTrue(parseRadarMapsJson("not json").isEmpty())
+    }
+}
+
+class MetarTest {
+
+    @Test
+    fun `parses aviationweather json with wind temp and pressure`() {
+        val json = """[{"icaoId":"EGNJ","rawOb":"METAR EGNJ 232120Z AUTO 21004KT 9999 NCD 10/07 Q1026",
+            "obsTime":1790198400,"temp":10.0,"dewp":7.0,"wdir":210,"wspd":4,
+            "visib":"6+","altim":1026}]"""
+        val m = parseMetarJson(json)!!
+        assertEquals("EGNJ", m.icaoId)
+        assertEquals(10.0, m.tempC!!, 0.01)
+        assertEquals(210, m.windFromDeg)
+        assertEquals(4, m.windSpeedKt)
+        assertEquals(1026, m.altimHpa)
+        assertEquals(1790198400000L, m.reportTimeMs)
+    }
+
+    @Test
+    fun `malformed json yields null`() {
+        assertNull(parseMetarJson("nope"))
+    }
+
+    @Test
+    fun `weather mapper decodes common groups`() {
+        assertEquals("Rain", WeatherMapper.describe("METAR EGLL 232120Z 21004KT 9999 RA 10/07 Q1026"))
+        assertEquals("Thunderstorm", WeatherMapper.describe("METAR EGLL 232120Z 21004KT TSRA 10/07 Q1026"))
+        assertEquals("Fog", WeatherMapper.describe("METAR EGLL 232120Z 21004KT 0500 FG 10/07 Q1026"))
+        assertEquals("Clear", WeatherMapper.describe("METAR EGNJ 232120Z AUTO 21004KT 9999 NCD 10/07 Q1026"))
+        assertEquals("Cloudy", WeatherMapper.describe("METAR EGLL 232120Z 21004KT 9999 OVC010 10/07 Q1026"))
+        assertEquals("Unknown", WeatherMapper.describe(""))
+    }
+
+    @Test
+    fun `station id and header tokens do not trigger false weather matches`() {
+        // EGBR contains 'BR' (Mist) but weather is CAVOK (Clear)
+        assertEquals("Clear", WeatherMapper.describe("METAR EGBR 232120Z AUTO 21004KT 9999 CAVOK 10/07 Q1026"))
+        assertEquals("Clear", WeatherMapper.describe("EGBR 232120Z AUTO 21004KT 9999 CAVOK 10/07 Q1026"))
+        // KRAI contains 'RA' (Rain)
+        assertEquals("Clear", WeatherMapper.describe("METAR KRAI 232120Z 21004KT 9999 NCD 10/07 A2992"))
+        // KGRR contains 'GR' (Hail)
+        assertEquals("Cloudy", WeatherMapper.describe("METAR KGRR 232120Z 21004KT 9999 OVC010 10/07 A2992"))
+    }
+
+    @Test
+    fun `emoji picks sun or moon for clear skies`() {
+        val emoji = WeatherMapper.emoji("Clear")
+        assertTrue(emoji == "☀️" || emoji == "🌙")
     }
 }

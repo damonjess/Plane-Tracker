@@ -37,7 +37,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.map.MapManager
-import com.example.plane_tracker.ui.AirportBoardSheet
+import com.example.plane_tracker.ui.AirportSheet
 import com.example.plane_tracker.ui.EmergencyBanner
 import com.example.plane_tracker.ui.FlightDetailsPanel
 import com.example.plane_tracker.ui.FilterSheet
@@ -91,6 +91,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             }
         }
         mapManager.onMapTapped = { viewModel.clearSelection() }
+        mapManager.onAirportTapped = { iata ->
+            Airports.byIata(iata)?.let { entry ->
+                viewModel.openAirportPage(entry)
+            }
+        }
     }
 
     // Push render frames to the map
@@ -174,8 +179,8 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                     )
                 },
                 onAirportClick = { ap ->
-                    mapManager.flyTo(ap.lat, ap.lon, 9.0)
-                    viewModel.openAirportBoard(ap)
+                    mapManager.flyTo(ap.lat, ap.lon, 11.0)
+                    viewModel.openAirportPage(ap)
                     viewModel.updateSearch("")
                 }
             )
@@ -281,19 +286,21 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             onDismiss = { filtersOpen = false }
         )
 
-        // Airport arrivals/departures board
-        AirportBoardSheet(
-            airport = uiState.boardAirport,
-            board = uiState.board,
-            loading = uiState.boardLoading,
+        // FR24-style airport page (weather + boards + ground traffic)
+        AirportSheet(
+            airport = uiState.airportPage,
+            metar = uiState.airportMetar,
+            board = uiState.airportBoard,
+            onGround = uiState.airportOnGround,
+            loading = uiState.airportLoading,
             onSelectAircraft = { ac ->
-                viewModel.closeAirportBoard()
+                viewModel.closeAirportPage()
                 viewModel.focusSearchResult(
                     ac,
                     onFocused = { lat, lon -> mapManager.flyTo(lat, lon, 11.0) }
                 )
             },
-            onClose = viewModel::closeAirportBoard
+            onClose = viewModel::closeAirportPage
         )
     }
 }

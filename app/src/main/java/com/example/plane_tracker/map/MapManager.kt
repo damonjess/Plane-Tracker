@@ -74,6 +74,8 @@ class MapManager(context: Context) {
 
     /** Called when a plane symbol is tapped (receives icao24 hex). */
     var onPlaneTapped: ((String) -> Unit)? = null
+    /** Called when an airport dot is tapped (receives IATA code). */
+    var onAirportTapped: ((String) -> Unit)? = null
     /** Called for taps on empty map area. */
     var onMapTapped: (() -> Unit)? = null
     /** Called when camera pitch/tilt changes (true = 3D tilted). */
@@ -283,6 +285,19 @@ class MapManager(context: Context) {
                 return
             }
         }
+        // Airport dots (only tappable when the layer is visible).
+        val airportsVisible = _airportsVisible
+        if (airportsVisible) {
+            val airportFeatures = m.queryRenderedFeatures(
+                android.graphics.RectF(screen.x - 20f, screen.y - 20f, screen.x + 20f, screen.y + 20f),
+                "airports-circle"
+            )
+            val iata = airportFeatures.firstOrNull()?.getStringProperty("iata")
+            if (!iata.isNullOrEmpty()) {
+                onAirportTapped?.invoke(iata)
+                return
+            }
+        }
         onMapTapped?.invoke()
     }
 
@@ -345,7 +360,10 @@ class MapManager(context: Context) {
         }
     }
 
+    private var _airportsVisible = false
+
     fun setAirportsVisible(visible: Boolean) {
+        _airportsVisible = visible
         setLayerVisible("airports-circle", visible)
         setLayerVisible("airport-labels", visible)
     }

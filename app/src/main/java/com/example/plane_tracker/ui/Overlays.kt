@@ -47,6 +47,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,7 +65,9 @@ import com.example.plane_tracker.data.AirportBoard
 import com.example.plane_tracker.data.BoardEntry
 import com.example.plane_tracker.data.BoardKind
 import com.example.plane_tracker.data.EmergencyEvent
+import com.example.plane_tracker.data.Metar
 import com.example.plane_tracker.data.RadarFrame
+import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.calculateClockETA
@@ -338,18 +341,58 @@ fun RadarOverlay(
     }
 }
 
-// ---------- Airport board sheet ----------
+// ---------- FR24-style airport page ----------
+
+private enum class AirportTab { GENERAL, DEPARTURES, ARRIVALS, ON_GROUND }
+
+/** Bottom tabs under the airport sheet, mirroring flightradar24's layout. */
+@Composable
+private fun AirportTabRow(selected: AirportTab, onSelect: (AirportTab) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PanelBg)
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        listOf(
+            AirportTab.GENERAL to ("📍" to "General"),
+            AirportTab.DEPARTURES to ("🛫" to "Departures"),
+            AirportTab.ARRIVALS to ("🛬" to "Arrivals"),
+            AirportTab.ON_GROUND to ("✈" to "On ground")
+        ).forEach { (tab, labels) ->
+            val active = tab == selected
+            Column(
+                modifier = Modifier
+                    .clickable { onSelect(tab) }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(labels.first, fontSize = 16.sp)
+                Text(
+                    labels.second,
+                    color = if (active) Accent else TextSecondary,
+                    fontSize = 10.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
+                )
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AirportBoardSheet(
+fun AirportSheet(
     airport: Airports.Entry?,
+    metar: Metar?,
     board: AirportBoard?,
+    onGround: List<Aircraft>,
     loading: Boolean,
     onSelectAircraft: (Aircraft) -> Unit,
     onClose: () -> Unit
 ) {
     if (airport == null) return
+    var tab by remember(airport.iata) { mutableStateOf(AirportTab.GENERAL) }
     ModalBottomSheet(
         onDismissRequest = onClose,
         containerColor = PanelBgLight,
@@ -358,97 +401,264 @@ fun AirportBoardSheet(
         Column(
             Modifier
                 .navigationBarsPadding()
-                .padding(horizontal = 20.dp)
         ) {
-            Text(
-                "${airport.iata} · Live traffic",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimary
-            )
-            Text(airport.name, color = TextSecondary, fontSize = 12.sp)
-            Spacer(Modifier.height(14.dp))
-
-            if (loading) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Accent)
-                    Spacer(Modifier.width(10.dp))
-                    Text("Scanning nearby traffic…", color = TextSecondary, fontSize = 13.sp)
-                }
-            } else {
-                val b = board
-                if (b == null || b.total == 0) {
+            // --- Header: name, codes, elevation ---
+            Column(Modifier.padding(horizontal = 20.dp)) {
+                Text(airport.name, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                Text(
+                    "${airport.iata} / ${airport.icao}",
+                    color = Accent,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val now = remember { java.util.Date() }
                     Text(
-                        "No tracked arrivals or departures within ${AirportBoardRadiusKm} km right now.",
+                        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(now) +
+                            " local · now",
                         color = TextSecondary,
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(vertical = 16.dp)
+                        fontSize = 12.sp
                     )
-                } else {
-                    BoardSection("DEPARTURES", b.departures, BoardKind.DEPARTURE, onSelectAircraft)
-                    Spacer(Modifier.height(10.dp))
-                    BoardSection("ARRIVALS", b.arrivals, BoardKind.ARRIVAL, onSelectAircraft)
                 }
             }
-            Spacer(Modifier.height(24.dp))
+
+            Spacer(Modifier.height(10.dp))
+
+            // --- Satellite photo tile (Esri World Imagery, keyless) ---
+            AsyncImage(
+                model = airportTileUrl(airport.lat, airport.lon),
+                contentDescription = "Satellite view of ${airport.name}",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .height(150.dp)
+                    .background(Color(0xFF10141A), RoundedCornerShape(12.dp)),
+                contentScale = ContentScale.Crop
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            // --- Weather strip: CONDITIONS / TEMPERATURE / WIND ---
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                WxCell(
+                    label = "CONDITIONS",
+                    value = metar?.condition ?: "—",
+                    emoji = metar?.let { WeatherMapper.emoji(it.condition) },
+                    modifier = Modifier.weight(1f)
+                )
+                WxCell(
+                    label = "TEMPERATURE",
+                    value = metar?.tempC?.let { "${it.roundToInt()}°C" } ?: "—",
+                    modifier = Modifier.weight(1f)
+                )
+                WxCell(
+                    label = "WIND",
+                    value = formatWind(metar),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // --- Raw METAR line ---
+            metar?.rawOb?.takeIf { it.isNotBlank() }?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    it,
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
+
+            // --- Tab content ---
+            when (tab) {
+                AirportTab.GENERAL -> {
+                    Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+                        GeneralRow("ICAO", airport.icao)
+                        GeneralRow("IATA", airport.iata)
+                        GeneralRow(
+                            "Position",
+                            "%.4f, %.4f".format(airport.lat, airport.lon)
+                        )
+                        GeneralRow("Pressure (QNH)", metar?.altimHpa?.let { "$it hPa" } ?: "—")
+                        GeneralRow(
+                            "Visibility",
+                            metar?.visibility?.let { v -> if (v == "6+") "10 km+" else "$v sm" } ?: "—"
+                        )
+                        GeneralRow(
+                            "Dew point",
+                            metar?.dewpointC?.let { "${it.roundToInt()}°C" } ?: "—"
+                        )
+                        GeneralRow("Traffic now", boardSummary(board, onGround))
+                    }
+                }
+                AirportTab.DEPARTURES -> BoardList(board?.departures, loading, onSelectAircraft)
+                AirportTab.ARRIVALS -> BoardList(board?.arrivals, loading, onSelectAircraft)
+                AirportTab.ON_GROUND -> GroundList(onGround, onSelectAircraft)
+            }
+
+            Spacer(Modifier.height(8.dp))
+            AirportTabRow(selected = tab, onSelect = { tab = it })
         }
     }
 }
 
-private const val AirportBoardRadiusKm = 400
+@Composable
+private fun WxCell(label: String, value: String, emoji: String? = null, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .background(PanelBg, RoundedCornerShape(10.dp))
+            .padding(vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(label, color = TextSecondary, fontSize = 9.sp, letterSpacing = 1.sp)
+        Spacer(Modifier.height(4.dp))
+        if (emoji != null) Text(emoji, fontSize = 18.sp)
+        Text(value, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+private fun formatWind(metar: Metar?): String = when {
+    metar == null -> "—"
+    metar.windSpeedKt == null || metar.windSpeedKt == 0 -> "Calm"
+    metar.windFromDeg == null -> "VRB ${metar.windSpeedKt}kt"
+    else -> "${metar.windFromDeg}° ${metar.windSpeedKt}kt"
+}
+
+private fun boardSummary(board: AirportBoard?, onGround: List<Aircraft>): String {
+    val dep = board?.departures?.size ?: 0
+    val arr = board?.arrivals?.size ?: 0
+    val gnd = onGround.size
+    return "$dep dep · $arr arr · $gnd ground"
+}
 
 @Composable
-private fun BoardSection(
-    title: String,
-    entries: List<BoardEntry>,
-    kind: BoardKind,
-    onSelect: (Aircraft) -> Unit
-) {
-    if (entries.isEmpty()) return
-    Text(title, color = TextSecondary, fontSize = 11.sp, letterSpacing = 1.sp)
-    entries.take(6).forEach { e ->
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onSelect(e.aircraft) }
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(if (kind == BoardKind.DEPARTURE) "🛫" else "🛬", fontSize = 14.sp)
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    e.aircraft.callsign.ifEmpty { e.aircraft.icao24.uppercase() },
-                    color = TextPrimary,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                val sub = listOfNotNull(e.routeLabel, e.airlineName).joinToString(" · ")
-                if (sub.isNotEmpty()) {
-                    Text(sub, color = TextSecondary, fontSize = 11.sp, maxLines = 1)
+private fun GeneralRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, color = TextSecondary, fontSize = 13.sp)
+        Text(value, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun BoardList(entries: List<BoardEntry>?, loading: Boolean, onSelect: (Aircraft) -> Unit) {
+    when {
+        loading -> Text(
+            "Scanning nearby traffic…",
+            color = TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(20.dp)
+        )
+        entries.isNullOrEmpty() -> Text(
+            "No tracked traffic on this route right now.",
+            color = TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(20.dp)
+        )
+        else -> Column(Modifier.padding(horizontal = 12.dp)) {
+            entries.take(8).forEach { e -> BoardRow(e, onSelect) }
+        }
+    }
+}
+
+@Composable
+private fun GroundList(aircraft: List<Aircraft>, onSelect: (Aircraft) -> Unit) {
+    if (aircraft.isEmpty()) {
+        Text(
+            "No aircraft on the ground right now.",
+            color = TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(20.dp)
+        )
+    } else {
+        Column(Modifier.padding(horizontal = 12.dp)) {
+            aircraft.take(8).forEach { ac ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(ac) }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("✈", color = Accent, fontSize = 14.sp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            ac.callsign.ifEmpty { ac.icao24.uppercase() },
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            listOfNotNull(
+                                ac.typeCode,
+                                ac.registration
+                            ).joinToString(" · ").ifEmpty { ac.icao24.uppercase() },
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
                 }
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    "${e.distanceKm} km",
-                    color = TextPrimary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    e.etaMinutes?.let { m ->
-                        if (m >= 60) "in ${m / 60}h ${m % 60}m" else "in ${m}m"
-                    } ?: "—",
-                    color = Accent,
-                    fontSize = 11.sp
-                )
             }
         }
     }
+}
+
+@Composable
+private fun BoardRow(e: BoardEntry, onSelect: (Aircraft) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onSelect(e.aircraft) }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(if (e.kind == BoardKind.DEPARTURE) "🛫" else "🛬", fontSize = 14.sp)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                e.aircraft.callsign.ifEmpty { e.aircraft.icao24.uppercase() },
+                color = TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            val sub = listOfNotNull(e.routeLabel, e.airlineName).joinToString(" · ")
+            if (sub.isNotEmpty()) {
+                Text(sub, color = TextSecondary, fontSize = 11.sp, maxLines = 1)
+            }
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text("${e.distanceKm} km", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text(
+                e.etaMinutes?.let { m -> if (m >= 60) "in ${m / 60}h ${m % 60}m" else "in ${m}m" } ?: "—",
+                color = Accent,
+                fontSize = 11.sp
+            )
+        }
+    }
+}
+
+/** Esri World Imagery satellite tile centered on the airport (keyless). */
+private fun airportTileUrl(lat: Double, lon: Double): String {
+    val z = 14
+    val n = Math.pow(2.0, z.toDouble()).toInt()
+    val x = ((lon + 180.0) / 360.0 * n).toInt()
+    val latRad = Math.toRadians(lat)
+    val y = ((1.0 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2.0 * n).toInt()
+    return "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
 }
 
 // ---------- Map control buttons ----------

@@ -129,6 +129,14 @@ class FlightRepository {
         parseRadarMapsJson(body)
     }
 
+    /** Fetches the current METAR for an airport by ICAO id (aviationweather.gov). */
+    suspend fun fetchMetar(icao: String): Metar? = withContext(Dispatchers.IO) {
+        if (icao.isBlank()) return@withContext null
+        val body = getBody("https://aviationweather.gov/api/data/metar?ids=$icao&format=json")
+            ?: return@withContext null
+        parseMetarJson(body)?.takeIf { it.icaoId.equals(icao, ignoreCase = true) }
+    }
+
     /** Resolves an aircraft photo from planespotters.net. */
     suspend fun fetchPhotoUrl(hex: String): String? = withContext(Dispatchers.IO) {
         if (hex.isBlank()) return@withContext null

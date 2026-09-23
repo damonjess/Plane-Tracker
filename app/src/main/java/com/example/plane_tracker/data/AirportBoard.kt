@@ -41,7 +41,7 @@ object AirportBoardBuilder {
         aircraft: List<Aircraft>,
         max: Int = 30,
     ): List<String> = aircraft.asSequence()
-        .filter { !it.onGround && it.callsign.isNotBlank() }
+        .filter { !it.onGround && it.callsign.isNotBlank() && !it.latitude.isNaN() && !it.longitude.isNaN() }
         .map { it to (GeoMath.distanceMeters(airportLat, airportLon, it.latitude, it.longitude) / 1000.0) }
         .filter { it.second <= MAX_RADIUS_KM }
         .sortedBy { it.second }
