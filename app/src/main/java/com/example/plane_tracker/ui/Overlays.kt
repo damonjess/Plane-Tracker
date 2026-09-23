@@ -7,12 +7,15 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -401,111 +404,119 @@ fun AirportSheet(
         Column(
             Modifier
                 .navigationBarsPadding()
+                .fillMaxHeight()
         ) {
-            // --- Header: name, codes, elevation ---
-            Column(Modifier.padding(horizontal = 20.dp)) {
-                Text(airport.name, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                Text(
-                    "${airport.iata} / ${airport.icao}",
-                    color = Accent,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val now = remember { java.util.Date() }
+            // --- Scrollable content: header, photo, weather, tab pages ---
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // Header: name, codes, local time
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    Text(airport.name, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                     Text(
-                        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(now) +
-                            " local · now",
+                        "${airport.iata} / ${airport.icao}",
+                        color = Accent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                            .format(java.util.Date()) + " local · now",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
                 }
-            }
 
-            Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(10.dp))
 
-            // --- Satellite photo tile (Esri World Imagery, keyless) ---
-            AsyncImage(
-                model = airportTileUrl(airport.lat, airport.lon),
-                contentDescription = "Satellite view of ${airport.name}",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .height(150.dp)
-                    .background(Color(0xFF10141A), RoundedCornerShape(12.dp)),
-                contentScale = ContentScale.Crop
-            )
-
-            Spacer(Modifier.height(10.dp))
-
-            // --- Weather strip: CONDITIONS / TEMPERATURE / WIND ---
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                WxCell(
-                    label = "CONDITIONS",
-                    value = metar?.condition ?: "—",
-                    emoji = metar?.let { WeatherMapper.emoji(it.condition) },
-                    modifier = Modifier.weight(1f)
+                // Satellite photo tile (Esri World Imagery, keyless)
+                AsyncImage(
+                    model = airportTileUrl(airport.lat, airport.lon),
+                    contentDescription = "Satellite view of ${airport.name}",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .height(150.dp)
+                        .background(Color(0xFF10141A), RoundedCornerShape(12.dp)),
+                    contentScale = ContentScale.Crop
                 )
-                WxCell(
-                    label = "TEMPERATURE",
-                    value = metar?.tempC?.let { "${it.roundToInt()}°C" } ?: "—",
-                    modifier = Modifier.weight(1f)
-                )
-                WxCell(
-                    label = "WIND",
-                    value = formatWind(metar),
-                    modifier = Modifier.weight(1f)
-                )
-            }
 
-            // --- Raw METAR line ---
-            metar?.rawOb?.takeIf { it.isNotBlank() }?.let {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    it,
-                    color = TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 2,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            }
+                Spacer(Modifier.height(10.dp))
 
-            Spacer(Modifier.height(12.dp))
-            HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
-
-            // --- Tab content ---
-            when (tab) {
-                AirportTab.GENERAL -> {
-                    Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
-                        GeneralRow("ICAO", airport.icao)
-                        GeneralRow("IATA", airport.iata)
-                        GeneralRow(
-                            "Position",
-                            "%.4f, %.4f".format(airport.lat, airport.lon)
-                        )
-                        GeneralRow("Pressure (QNH)", metar?.altimHpa?.let { "$it hPa" } ?: "—")
-                        GeneralRow(
-                            "Visibility",
-                            metar?.visibility?.let { v -> if (v == "6+") "10 km+" else "$v sm" } ?: "—"
-                        )
-                        GeneralRow(
-                            "Dew point",
-                            metar?.dewpointC?.let { "${it.roundToInt()}°C" } ?: "—"
-                        )
-                        GeneralRow("Traffic now", boardSummary(board, onGround))
-                    }
+                // Weather strip: CONDITIONS / TEMPERATURE / WIND
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    WxCell(
+                        label = "CONDITIONS",
+                        value = metar?.condition ?: "—",
+                        emoji = metar?.let { WeatherMapper.emoji(it.condition) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    WxCell(
+                        label = "TEMPERATURE",
+                        value = metar?.tempC?.let { "${it.roundToInt()}°C" } ?: "—",
+                        modifier = Modifier.weight(1f)
+                    )
+                    WxCell(
+                        label = "WIND",
+                        value = formatWind(metar),
+                        modifier = Modifier.weight(1f)
+                    )
                 }
-                AirportTab.DEPARTURES -> BoardList(board?.departures, loading, onSelectAircraft)
-                AirportTab.ARRIVALS -> BoardList(board?.arrivals, loading, onSelectAircraft)
-                AirportTab.ON_GROUND -> GroundList(onGround, onSelectAircraft)
+
+                // Raw METAR line
+                metar?.rawOb?.takeIf { it.isNotBlank() }?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        it,
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        maxLines = 2,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
+
+                // Tab page content
+                when (tab) {
+                    AirportTab.GENERAL -> {
+                        Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+                            GeneralRow("ICAO", airport.icao)
+                            GeneralRow("IATA", airport.iata)
+                            GeneralRow(
+                                "Position",
+                                "%.4f, %.4f".format(airport.lat, airport.lon)
+                            )
+                            GeneralRow("Pressure (QNH)", metar?.altimHpa?.let { "$it hPa" } ?: "—")
+                            GeneralRow(
+                                "Visibility",
+                                metar?.visibility?.let { v -> if (v == "6+") "10 km+" else "$v sm" } ?: "—"
+                            )
+                            GeneralRow(
+                                "Dew point",
+                                metar?.dewpointC?.let { "${it.roundToInt()}°C" } ?: "—"
+                            )
+                            GeneralRow("Traffic now", boardSummary(board, onGround))
+                        }
+                    }
+                    AirportTab.DEPARTURES -> BoardList(board?.departures, loading, onSelectAircraft)
+                    AirportTab.ARRIVALS -> BoardList(board?.arrivals, loading, onSelectAircraft)
+                    AirportTab.ON_GROUND -> GroundList(onGround, onSelectAircraft)
+                }
+
+                Spacer(Modifier.height(8.dp))
             }
 
-            Spacer(Modifier.height(8.dp))
+            // --- Pinned tab bar (always visible, like FR24) ---
+            HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
             AirportTabRow(selected = tab, onSelect = { tab = it })
         }
     }
