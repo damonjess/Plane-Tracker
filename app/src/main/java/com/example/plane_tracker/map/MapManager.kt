@@ -14,6 +14,7 @@ import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.MapFrame
 import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.data.Vessel
+import com.example.plane_tracker.data.VesselTrailPoint
 import com.example.plane_tracker.util.GeoMath
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
@@ -71,6 +72,7 @@ class MapManager(context: Context) {
     private lateinit var emergencySource: GeoJsonSource
     private lateinit var vesselsSource: GeoJsonSource
     private lateinit var vesselSelectedSource: GeoJsonSource
+    private lateinit var vesselTrailSource: GeoJsonSource
     private var radarUrl: String? = null
     /** Ping-pong slot for smooth radar crossfades: 0 = layer-a, 1 = layer-b. */
     private var radarSlot = 1
@@ -84,6 +86,8 @@ class MapManager(context: Context) {
     var onAirportTapped: ((String) -> Unit)? = null
     /** Called when a lifeboat symbol is tapped (receives MMSI). */
     var onVesselTapped: ((String) -> Unit)? = null
+    /** Called on camera idle with the visible bounds (sw lat/lon, ne lat/lon). */
+    var onViewportChanged: ((Double, Double, Double, Double) -> Unit)? = null
     /** Called for taps on empty map area. */
     var onMapTapped: (() -> Unit)? = null
     /** Called when camera pitch/tilt changes (true = 3D tilted). */
@@ -108,6 +112,20 @@ class MapManager(context: Context) {
                     map.addOnCameraIdleListener {
                         val isTilted = map.cameraPosition.tilt > 10.0
                         onCameraTiltChanged?.invoke(isTilted)
+                        // Feed the visible bounds to the AIS subscription so
+                        // the stream follows wherever the user is looking.
+                        val region = map.projection.visibleRegion
+                        val lats = listOfNotNull(
+                            region.farLeft?.latitude, region.farRight?.latitude,
+                            region.nearLeft?.latitude, region.nearRight?.latitude
+                        )
+                        val lons = listOfNotNull(
+                            region.farLeft?.longitude, region.farRight?.longitude,
+                            region.nearLeft?.longitude, region.nearRight?.longitude
+                        )
+                        if (lats.size == 4 && lons.size == 4) {
+                            onViewportChanged?.invoke(lats.min(), lons.min(), lats.max(), lons.max())
+                        }
                     }
                     map.cameraPosition = CameraPosition.Builder()
                         .target(LatLng(DEFAULT_LAT, DEFAULT_LON))
@@ -147,6 +165,8 @@ class MapManager(context: Context) {
         style.addSource(vesselsSource)
         vesselSelectedSource = GeoJsonSource("vessel-selected-source")
         style.addSource(vesselSelectedSource)
+        vesselTrailSource = GeoJsonSource("vessel-trail-source")
+        style.addSource(vesselTrailSource)
 
         // --- Airport layers (bottom of stack, hidden by default) ---
         style.addLayer(
@@ -349,6 +369,17 @@ class MapManager(context: Context) {
                 )
         )
 
+        // --- Selected vessel's course trail (under the icons) ---
+        style.addLayerBelow(
+            LineLayer("vessel-trail", "vessel-trail-source")
+                .withProperties(
+                    PropertyFactory.lineColor("#ff8f3d"),
+                    PropertyFactory.lineWidth(2.5f),
+                    PropertyFactory.lineOpacity(0.85f)
+                ),
+            "vessels-layer"
+        )
+
         // --- Selected-vessel ring (pulses under the tapped lifeboat) ---
         style.addLayerBelow(
             CircleLayer("vessel-selected-ring", "vessel-selected-source")
@@ -543,6 +574,20 @@ class MapManager(context: Context) {
                     listOf(Feature.fromGeometry(Point.fromLngLat(vessel.longitude, vessel.latitude)))
                 )
             )
+        }
+    }
+
+    /** Draws the selected vessel's recent course trail (null clears it). */
+    fun updateVesselTrail(points: List<VesselTrailPoint>?) {
+        requireMain {
+            if (!styleReady) return@requireMain
+            if (points.isNullOrEmpty()) {
+                vesselTrailSource.setGeoJson(EMPTY_COLLECTION)
+            } else {
+                vesselTrailSource.setGeoJson(
+                    LineString.fromLngLats(points.map { Point.fromLngLat(it.longitude, it.latitude) })
+                )
+            }
         }
     }
 

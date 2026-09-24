@@ -10,6 +10,7 @@ import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.data.parseRadarMapsJson
 import com.example.plane_tracker.data.parseMetarJson
+import com.example.plane_tracker.data.AisRepository
 import com.example.plane_tracker.data.EmergencyHistoryTracker
 import com.example.plane_tracker.data.FleetState
 import com.example.plane_tracker.data.FlightEngine
@@ -18,6 +19,7 @@ import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.OpsCategory
 import com.example.plane_tracker.data.Vessel
+import com.example.plane_tracker.data.VesselTrailRecorder
 import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgressCalculator
@@ -739,5 +741,88 @@ class EmergencyHistoryTrackerTest {
         val vessel = Vessel(mmsi = "235007795", shipType = 51, navStatus = 5)
         assertEquals("Search and Rescue vessel", vessel.shipTypeText)
         assertEquals("Moored", vessel.navStatusText)
+    }
+}
+
+class VesselTrailRecorderTest {
+
+    @Test
+    fun `samples only land after interval AND real movement`() {
+        val rec = VesselTrailRecorder(minIntervalMs = 10_000, minDistanceMeters = 50.0)
+        rec.record("m1", 53.0, -0.5, nowMs = 0)
+        // Too soon, even though it moved (~111 m)
+        rec.record("m1", 53.001, -0.5, nowMs = 5_000)
+        assertEquals(1, rec.trailFor("m1").size)
+        // Enough time, but GPS wobble only (~11 m)
+        rec.record("m1", 53.0001, -0.5, nowMs = 20_000)
+        assertEquals(1, rec.trailFor("m1").size)
+        // Enough time and real movement
+        rec.record("m1", 53.001, -0.5, nowMs = 20_000)
+        assertEquals(2, rec.trailFor("m1").size)
+    }
+
+    @Test
+    fun `trail is capped and drops oldest first`() {
+        val rec = VesselTrailRecorder(minIntervalMs = 0, minDistanceMeters = 1.0, maxPoints = 3)
+        for (i in 0 until 5) {
+            rec.record("m2", 53.0 + i * 0.001, -0.5, nowMs = i * 1_000L)
+        }
+        val trail = rec.trailFor("m2")
+        assertEquals(3, trail.size)
+        assertEquals(53.002, trail.first().latitude, 1e-9)
+        assertEquals(53.004, trail.last().latitude, 1e-9)
+    }
+
+    @Test
+    fun `retainAll drops trails for vessels no longer live`() {
+        val rec = VesselTrailRecorder()
+        rec.record("a", 53.0, -0.5, 0)
+        rec.record("b", 54.0, -0.5, 0)
+        rec.retainAll(setOf("a"))
+        assertEquals(1, rec.trailFor("a").size)
+        assertTrue(rec.trailFor("b").isEmpty())
+    }
+
+    @Test
+    fun `zero-zero null-island position is never recorded`() {
+        val rec = VesselTrailRecorder()
+        rec.record("x", 0.0, 0.0, 0)
+        assertTrue(rec.trailFor("x").isEmpty())
+    }
+}
+
+class ViewportBoxTest {
+
+    @Test
+    fun `ordinary box passes through unchanged`() {
+        val box = AisRepository.clampedViewportBox(50.0, -5.0, 58.0, 5.0)
+        assertEquals(50.0, box[0], 1e-9)
+        assertEquals(-5.0, box[1], 1e-9)
+        assertEquals(58.0, box[2], 1e-9)
+        assertEquals(5.0, box[3], 1e-9)
+    }
+
+    @Test
+    fun `zoomed-out box is capped to 50 degrees per axis around its centre`() {
+        val box = AisRepository.clampedViewportBox(-10.0, -60.0, 70.0, 60.0)
+        assertEquals(50.0, box[2] - box[0], 1e-9)
+        assertEquals(50.0, box[3] - box[1], 1e-9)
+        assertEquals(30.0, (box[0] + box[2]) / 2, 1e-9)
+        assertEquals(0.0, (box[1] + box[3]) / 2, 1e-9)
+    }
+
+    @Test
+    fun `out-of-range latitudes clamp before capping`() {
+        val box = AisRepository.clampedViewportBox(-120.0, 0.0, 150.0, 1.0)
+        assertEquals(50.0, box[2] - box[0], 1e-9)
+        assertTrue(box[0] >= -90.0 && box[2] <= 90.0)
+    }
+
+    @Test
+    fun `antimeridian crossing wraps the far edge`() {
+        // Camera spanning the date line: 170E to 170W
+        val box = AisRepository.clampedViewportBox(50.0, 170.0, 56.0, -170.0)
+        assertEquals(170.0, box[1], 1e-9)
+        assertEquals(-170.0, box[3], 1e-9)
     }
 }

@@ -111,6 +111,9 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 mapManager.flyTo(lb.latitude, lb.longitude, 11.0)
             }
         }
+        mapManager.onViewportChanged = { minLat, minLon, maxLat, maxLon ->
+            viewModel.onMapViewportChanged(minLat, minLon, maxLat, maxLon)
+        }
     }
 
     // Push render frames to the map
@@ -136,8 +139,15 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
 
     // Apply camera padding so selected aircraft center in open map space above details card
     val density = LocalDensity.current
-    LaunchedEffect(uiState.selected != null, uiState.selectedLifeboat != null, uiState.isFollowing) {
-        if ((uiState.selected != null || uiState.selectedLifeboat != null) && !uiState.isFollowing) {
+    LaunchedEffect(
+        uiState.selected != null,
+        uiState.selectedLifeboat != null,
+        uiState.isFollowing,
+        uiState.isFollowingVessel
+    ) {
+        if ((uiState.selected != null || uiState.selectedLifeboat != null) &&
+            !uiState.isFollowing && !uiState.isFollowingVessel
+        ) {
             val topPx = with(density) { 90.dp.roundToPx() }
             val bottomPx = with(density) { 360.dp.roundToPx() }
             mapManager.setPadding(0, topPx, 0, bottomPx)
@@ -229,7 +239,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                     lifeboatCount = uiState.lifeboats.size
                 )
 
-                if (uiState.isFollowing) {
+                if (uiState.isFollowing || uiState.isFollowingVessel) {
                     FollowingChip(
                         onCancel = viewModel::toggleFollow
                     )
@@ -285,6 +295,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             mapManager.updateSelectedVessel(uiState.selectedLifeboat)
         }
 
+        // Draw the selected vessel's recent course
+        LaunchedEffect(uiState.selectedLifeboatTrail) {
+            mapManager.updateVesselTrail(uiState.selectedLifeboatTrail)
+        }
+
         // Sync flight replay track and active position to the map
         LaunchedEffect(uiState.replayFlight, uiState.replayPoints, uiState.replayIndex) {
             val flight = uiState.replayFlight
@@ -323,7 +338,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         )
 
         // Bottom: flight details (hidden when follow mode is active)
-        if (!uiState.isFollowing) {
+        if (!uiState.isFollowing && !uiState.isFollowingVessel) {
             uiState.selected?.let { selected ->
                 FlightDetailsPanel(
                     selected = selected,
@@ -347,7 +362,9 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 LifeboatDetailsPanel(
                     vessel = selectedLifeboat,
                     metar = metar,
+                    isFollowing = uiState.isFollowingVessel,
                     onClose = viewModel::clearSelection,
+                    onToggleFollow = viewModel::toggleVesselFollow,
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
