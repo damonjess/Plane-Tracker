@@ -20,6 +20,9 @@ data class Vessel(
     var widthMeters: Int = 0,
     var imoNumber: Int = 0
 ) {
+    /** Set when name/type changed and the cached lifeboat verdict needs recomputing. Managed by AisRepository. */
+    @Volatile
+    var lifeboatCheckDirty: Boolean = true
     /** Derives country flag emoji and country name from MMSI MID digits. */
     val countryFlagAndName: Pair<String, String>
         get() = GeoMath.getFlagAndCountryFromMmsi(mmsi)

@@ -280,6 +280,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             mapManager.updateVessels(uiState.lifeboats)
         }
 
+        // Keep the selection ring glued to the chosen lifeboat
+        LaunchedEffect(uiState.selectedLifeboat) {
+            mapManager.updateSelectedVessel(uiState.selectedLifeboat)
+        }
+
         // Sync flight replay track and active position to the map
         LaunchedEffect(uiState.replayFlight, uiState.replayPoints, uiState.replayIndex) {
             val flight = uiState.replayFlight

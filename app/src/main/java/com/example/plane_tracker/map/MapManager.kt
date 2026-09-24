@@ -70,6 +70,7 @@ class MapManager(context: Context) {
     private lateinit var courseSource: GeoJsonSource
     private lateinit var emergencySource: GeoJsonSource
     private lateinit var vesselsSource: GeoJsonSource
+    private lateinit var vesselSelectedSource: GeoJsonSource
     private var radarUrl: String? = null
     /** Ping-pong slot for smooth radar crossfades: 0 = layer-a, 1 = layer-b. */
     private var radarSlot = 1
@@ -144,6 +145,8 @@ class MapManager(context: Context) {
         
         vesselsSource = GeoJsonSource("vessels-source")
         style.addSource(vesselsSource)
+        vesselSelectedSource = GeoJsonSource("vessel-selected-source")
+        style.addSource(vesselSelectedSource)
 
         // --- Airport layers (bottom of stack, hidden by default) ---
         style.addLayer(
@@ -324,14 +327,45 @@ class MapManager(context: Context) {
         )
 
         // --- AIS Lifeboats ---
+        // RNLI-style marker: orange hull icon with white ring, rotating to
+        // course-over-ground when the vessel is under way.
+        style.addImage("lifeboat-icon", createLifeboatBitmap())
         style.addLayer(
             SymbolLayer("vessels-layer", "vessels-source")
                 .withProperties(
-                    PropertyFactory.iconImage("badge-LIFEBOAT"),
+                    PropertyFactory.iconImage("lifeboat-icon"),
                     PropertyFactory.iconAllowOverlap(true),
                     PropertyFactory.iconIgnorePlacement(true),
-                    PropertyFactory.iconSize(1.0f)
+                    PropertyFactory.iconSize(
+                        Expression.interpolate(
+                            Expression.linear(), Expression.zoom(),
+                            Expression.stop(4.0, 0.55f),
+                            Expression.stop(10.0, 0.85f),
+                            Expression.stop(14.0, 1.1f)
+                        )
+                    ),
+                    PropertyFactory.iconRotate(Expression.get("heading")),
+                    PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_VIEWPORT)
                 )
+        )
+
+        // --- Selected-vessel ring (pulses under the tapped lifeboat) ---
+        style.addLayerBelow(
+            CircleLayer("vessel-selected-ring", "vessel-selected-source")
+                .withProperties(
+                    PropertyFactory.circleColor("rgba(255, 143, 61, 0.18)"),
+                    PropertyFactory.circleRadius(
+                        Expression.interpolate(
+                            Expression.linear(), Expression.zoom(),
+                            Expression.stop(5.0, 12.0f), Expression.stop(11.0, 24.0f)
+                        )
+                    ),
+                    PropertyFactory.circleStrokeColor("#ff8f3d"),
+                    PropertyFactory.circleStrokeWidth(2.5f),
+                    PropertyFactory.circleStrokeOpacity(0.9f)
+                )
+            ,
+            "vessels-layer"
         )
 
         // --- Airport weather chips (IATA + condition, toggleable) ---
@@ -492,9 +526,23 @@ class MapManager(context: Context) {
                 val feature = Feature.fromGeometry(Point.fromLngLat(v.longitude, v.latitude))
                 feature.addStringProperty("mmsi", v.mmsi)
                 feature.addStringProperty("name", v.name)
+                feature.addNumberProperty("heading", v.heading)
                 feature
             }
             vesselsSource.setGeoJson(FeatureCollection.fromFeatures(features))
+        }
+    }
+
+    /** Shows the orange selection ring at a vessel's position (null hides it). */
+    fun updateSelectedVessel(vessel: Vessel?) {
+        requireMain {
+            if (!styleReady) return@requireMain
+            vesselSelectedSource.setGeoJson(
+                if (vessel == null) EMPTY_COLLECTION
+                else FeatureCollection.fromFeatures(
+                    listOf(Feature.fromGeometry(Point.fromLngLat(vessel.longitude, vessel.latitude)))
+                )
+            )
         }
     }
 
@@ -790,5 +838,67 @@ fun createPlaneBitmap(colorHex: String): Bitmap {
     }
     canvas.drawPath(path, fill)
     canvas.drawPath(path, stroke)
+    return bitmap
+}
+
+/**
+ * Renders the RNLI-style lifeboat marker: an orange boat hull pointing up
+ * (0° = north) inside a white ring on a dark disc, like the plane icons.
+ */
+fun createLifeboatBitmap(): Bitmap {
+    val size = 48
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val cx = size / 2f
+
+    // Dark disc background (matches the ops badge look)
+    val bg = Paint().apply {
+        color = AndroidColor.parseColor("#EE10141A")
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    canvas.drawCircle(cx, cx, cx - 1f, bg)
+
+    // White ring
+    val ring = Paint().apply {
+        color = AndroidColor.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f
+        isAntiAlias = true
+    }
+    canvas.drawCircle(cx, cx, cx - 2.5f, ring)
+
+    // Orange RNLI-style hull: pointed bow at top, flat stern at bottom
+    val hull = Paint().apply {
+        color = AndroidColor.parseColor("#FF6B1A")
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    val hullEdge = Paint().apply {
+        color = AndroidColor.parseColor("#B33F00")
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f
+        isAntiAlias = true
+        strokeJoin = Paint.Join.ROUND
+    }
+    val path = Path().apply {
+        moveTo(cx, 9f)                 // bow
+        lineTo(cx + 6.5f, 22f)         // starboard shoulder
+        lineTo(cx + 5.5f, 33f)         // starboard quarter
+        lineTo(cx - 5.5f, 33f)         // stern
+        lineTo(cx - 6.5f, 22f)         // port shoulder
+        close()
+    }
+    canvas.drawPath(path, hull)
+    canvas.drawPath(path, hullEdge)
+
+    // Cabin: small blue rectangle near the stern (RNLI lifeboats have one)
+    val cabin = Paint().apply {
+        color = AndroidColor.parseColor("#1E4E8C")
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    canvas.drawRoundRect(cx - 3f, 24f, cx + 3f, 30f, 1.5f, 1.5f, cabin)
+
     return bitmap
 }
