@@ -11,6 +11,7 @@ import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.data.parseRadarMapsJson
 import com.example.plane_tracker.data.parseMetarJson
 import com.example.plane_tracker.data.EmergencyHistoryTracker
+import com.example.plane_tracker.util.ArMath
 import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.OpsCategory
@@ -468,6 +469,69 @@ class OpsClassifierTest {
         assertTrue(ac.isMilitary)
         assertTrue(ac.isLadd)
         assertFalse(ac(dbFlags = 0).isMilitary)
+    }
+}
+
+class ArMathTest {
+
+    @Test
+    fun `bearing north south east west`() {
+        // Due north
+        assertEquals(0.0, ArMath.bearingDeg(53.0, -1.0, 54.0, -1.0), 0.5)
+        // Due south
+        assertEquals(180.0, ArMath.bearingDeg(54.0, -1.0, 53.0, -1.0), 0.5)
+        // Due east (along the equator-ish latitude for simplicity)
+        assertEquals(90.0, ArMath.bearingDeg(0.0, 0.0, 0.0, 1.0), 0.5)
+        // Due west
+        assertEquals(270.0, ArMath.bearingDeg(0.0, 1.0, 0.0, 0.0), 0.5)
+    }
+
+    @Test
+    fun `elevation 45 degrees for equal horizontal and vertical`() {
+        assertEquals(45.0, ArMath.elevationDeg(1000.0, 1000.0), 0.1)
+        assertEquals(0.0, ArMath.elevationDeg(1000.0, 0.0), 0.1)
+        assertEquals(-45.0, ArMath.elevationDeg(1000.0, -1000.0), 0.1)
+    }
+
+    @Test
+    fun `projection centers target dead ahead`() {
+        val p = ArMath.project(90.0, 20.0, deviceAzimuthDeg = 90.0, devicePitchDeg = 20.0, screenW = 100f, screenH = 100f)
+        assertTrue(p.onScreen)
+        assertEquals(50f, p.x, 1f)
+        assertEquals(50f, p.y, 1f)
+    }
+
+    @Test
+    fun `projection rejects target behind view`() {
+        val p = ArMath.project(270.0, 20.0, deviceAzimuthDeg = 90.0, devicePitchDeg = 20.0)
+        assertFalse(p.onScreen)
+    }
+
+    @Test
+    fun `projection maps up and down correctly`() {
+        // Target higher than view centre -> smaller y (screen up). dEl = +15 deg (inside 45 deg vFov)
+        val high = ArMath.project(90.0, 35.0, 90.0, 20.0, screenW = 100f, screenH = 100f)
+        assertTrue(high.onScreen && high.y < 50f)
+        // Target lower -> larger y. dEl = -15 deg
+        val low = ArMath.project(90.0, 5.0, 90.0, 20.0, screenW = 100f, screenH = 100f)
+        assertTrue(low.onScreen && low.y > 50f)
+    }
+
+    @Test
+    fun `bearing wrap handles north crossing`() {
+        // View centred on 350 deg; target at 10 deg is 20 deg to the right, still on screen
+        val p = ArMath.project(10.0, 30.0, deviceAzimuthDeg = 350.0, devicePitchDeg = 30.0, screenW = 100f, screenH = 100f)
+        assertTrue(p.onScreen)
+        assertTrue(p.x > 50f)
+    }
+
+    @Test
+    fun `near edge detection works`() {
+        val center = ArMath.ScreenPos(50f, 50f, onScreen = true)
+        assertFalse(ArMath.nearEdge(center, 100f, 100f))
+
+        val edge = ArMath.ScreenPos(2f, 50f, onScreen = true)
+        assertTrue(ArMath.nearEdge(edge, 100f, 100f))
     }
 }
 

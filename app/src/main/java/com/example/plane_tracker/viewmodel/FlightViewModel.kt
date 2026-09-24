@@ -477,6 +477,18 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
         return opsCategoryFor(ac)
     }
 
+    /** Live aircraft snapshot for the AR sky view. */
+    fun aircraftForAr(): List<Aircraft> = engine.allAircraft(System.currentTimeMillis())
+
+    /** Ops category labels by hex for the AR overlay badges. */
+    fun opsLabelsForAr(): Map<String, String> {
+        val out = mutableMapOf<String, String>()
+        _uiState.value.opsAircraft.forEach { (ac, cat) ->
+            out[ac.icao24] = "${cat.emoji} ${cat.label}"
+        }
+        return out
+    }
+
     /** Hides an emergency banner; it returns if the aircraft squawks again later. */
     fun dismissEmergency(hex: String) {
         dismissedEmergencyHexes.add(hex)

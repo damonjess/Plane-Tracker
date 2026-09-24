@@ -922,6 +922,7 @@ fun MapControls(
     onToggleRadar: () -> Unit,
     onOpenOps: () -> Unit,
     onOpenAlerts: () -> Unit,
+    onOpenAr: () -> Unit,
     onOpenFilters: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -939,6 +940,7 @@ fun MapControls(
         ControlButton("AB", "Callsigns", onToggleLabels, active = labelsOn)
         ControlButton("🚁", "Emergency services & military", onOpenOps)
         ControlButton("⏱", "Squawk history", onOpenAlerts)
+        ControlButton("AR", "Sky view: point at the sky", onOpenAr)
         ControlButton("☰", "Filters", onOpenFilters)
     }
 }

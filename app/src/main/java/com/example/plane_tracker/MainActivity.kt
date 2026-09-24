@@ -80,6 +80,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
     var radarIndex by remember { mutableIntStateOf(0) }
     var opsOpen by remember { mutableStateOf(false) }
     var alertHistoryOpen by remember { mutableStateOf(false) }
+    var arOpen by remember { mutableStateOf(false) }
 
     val uiState by viewModel.uiState.collectAsState()
 
@@ -289,6 +290,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             onToggleRadar = viewModel::toggleRadar,
             onOpenOps = { opsOpen = true },
             onOpenAlerts = { alertHistoryOpen = true },
+            onOpenAr = { arOpen = true },
             onOpenFilters = { filtersOpen = true },
             modifier = Modifier
                 .align(Alignment.CenterEnd)
@@ -313,6 +315,21 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
+        }
+
+        // AR sky view (full-screen camera overlay)
+        if (arOpen) {
+            com.example.plane_tracker.ui.ArSkyScreen(
+                aircraft = remember(uiState.aircraftCount, uiState.lastUpdateMs) {
+                    viewModel.aircraftForAr()
+                },
+                opsByHex = remember(uiState.opsAircraft) { viewModel.opsLabelsForAr() },
+                onSelect = { hex ->
+                    arOpen = false
+                    viewModel.selectAircraft(hex)
+                },
+                onClose = { arOpen = false }
+            )
         }
 
         // Filter bottom sheet
