@@ -1556,7 +1556,9 @@ private fun FilterToggle(label: String, checked: Boolean, onChecked: (Boolean) -
 fun LifeboatDetailsPanel(
     vessel: Vessel,
     metar: Metar? = null,
+    isFollowing: Boolean = false,
     onClose: () -> Unit,
+    onToggleFollow: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     AnimatedVisibility(
@@ -1594,6 +1596,14 @@ fun LifeboatDetailsPanel(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
+                    IconButton(onClick = onToggleFollow, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Filled.LocationOn,
+                            contentDescription = if (isFollowing) "Stop following" else "Follow vessel",
+                            tint = if (isFollowing) Accent else TextPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                     IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Filled.Close,

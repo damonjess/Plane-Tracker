@@ -24,6 +24,7 @@ import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.RouteProgressCalculator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,7 +96,11 @@ data class TrackerUiState(
     /** AIS Lifeboats. */
     val lifeboats: List<Vessel> = emptyList(),
     /** Currently selected lifeboat. */
-    val selectedLifeboat: Vessel? = null
+    val selectedLifeboat: Vessel? = null,
+    /** Recent course of the selected lifeboat, oldest first. */
+    val selectedLifeboatTrail: List<com.example.plane_tracker.data.VesselTrailPoint> = emptyList(),
+    /** True while the camera is following the selected lifeboat. */
+    val isFollowingVessel: Boolean = false
 )
 
 class FlightViewModel(application: Application) : AndroidViewModel(application) {
@@ -141,6 +146,11 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     /** WebSocket for AIS */
     private val aisRepo = AisRepository(OkHttpClient())
 
+    /** Camera-follow for a lifeboat: non-null = the MMSI we're tracking. */
+    private var followingVesselMmsi: String? = null
+    /** Latest visible bounds from the map, for the viewport AIS subscription. */
+    private var lastViewportBox: List<Double>? = null
+
     /** Owner names fetched from adsbdb, cached per hex. */
     private val ownerByHex = java.util.concurrent.ConcurrentHashMap<String, String>()
     /**
@@ -173,7 +183,10 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 _uiState.value = _uiState.value.copy(
                     lifeboats = lifeboats,
-                    selectedLifeboat = updatedSelected
+                    selectedLifeboat = updatedSelected,
+                    selectedLifeboatTrail = updatedSelected?.let {
+                        aisRepo.vesselTrail(it.mmsi)
+                    } ?: emptyList()
                 )
             }
         }
@@ -184,6 +197,7 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
         startMilitaryHexLoop()
         startAirportWxLoop()
         startHistoryTrim()
+        startViewportSyncLoop()
     }
 
     private fun emptyCollection() = FeatureCollection.fromFeatures(emptyList<Feature>())
@@ -435,6 +449,11 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
 
         val followPos = if (followingHex != null) {
             selected?.let { org.maplibre.android.geometry.LatLng(it.latitude, it.longitude) }
+        } else if (followingVesselMmsi != null) {
+            // Camera-follow for a lifeboat: ride the live vessel position.
+            _uiState.value.selectedLifeboat
+                ?.takeIf { it.mmsi == followingVesselMmsi }
+                ?.let { org.maplibre.android.geometry.LatLng(it.latitude, it.longitude) }
         } else null
 
         val trailPoints = if (selected != null && filters.showTrail) {
@@ -476,6 +495,8 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
 
     /** User tapped a plane on the map. */
     fun selectAircraft(hex: String, onFlyTo3D: ((Double, Double, Float) -> Unit)? = null) {
+        // A plane tap replaces any vessel selection / vessel camera-follow.
+        if (followingVesselMmsi != null) stopFollowingVessel()
         engine.selectedHex = hex
         val ac = engine.aircraftByHex(hex)
         lastSelectedWasDescending = ac?.let { it.climbFpm < -300 } ?: false
@@ -484,6 +505,8 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.value = _uiState.value.copy(
                 selected = SelectedFlight(ac, opsCategory = opsCategoryFor(ac)),
                 routeProgress = null,
+                selectedLifeboat = null,
+                selectedLifeboatTrail = emptyList(),
                 isLoadingDetails = true
             )
 
@@ -525,15 +548,34 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     fun clearSelection() {
         engine.selectedHex = null
         followingHex = null
+        followingVesselMmsi = null
         _uiState.value = _uiState.value.copy(
-            selected = null, selectedLifeboat = null, routeProgress = null, isFollowing = false, isLoadingDetails = false
+            selected = null, selectedLifeboat = null, selectedLifeboatTrail = emptyList(),
+            routeProgress = null, isFollowing = false, isFollowingVessel = false, isLoadingDetails = false
         )
     }
 
     fun toggleFollow() {
-        val hex = engine.selectedHex ?: return
+        val hex = engine.selectedHex
+        if (hex == null) {
+            // No plane selected: a tap here means the vessel chip was tapped.
+            if (followingVesselMmsi != null) stopFollowingVessel()
+            return
+        }
         followingHex = if (followingHex == hex) null else hex
         _uiState.value = _uiState.value.copy(isFollowing = followingHex != null)
+    }
+
+    /** Toggles camera-follow for the currently selected lifeboat. */
+    fun toggleVesselFollow() {
+        val mmsi = _uiState.value.selectedLifeboat?.mmsi ?: return
+        followingVesselMmsi = if (followingVesselMmsi == mmsi) null else mmsi
+        _uiState.value = _uiState.value.copy(isFollowingVessel = followingVesselMmsi != null)
+    }
+
+    private fun stopFollowingVessel() {
+        followingVesselMmsi = null
+        _uiState.value = _uiState.value.copy(isFollowingVessel = false)
     }
 
     fun updateFilters(transform: (FilterState) -> FilterState) {
@@ -760,6 +802,32 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
         map.setLabelsVisible(f.showLabels)
     }
 
+    private var viewportSyncJob: Job? = null
+
+    /**
+     * Viewport-driven AIS subscription: the map reports its visible bounds on
+     * camera idle; we update immediately on initial load or debounce 300ms when moving.
+     * Keeps the stream pointed at whatever waters the user is looking at.
+     */
+    fun onMapViewportChanged(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double) {
+        val box = listOf(minLat, minLon, maxLat, maxLon)
+        if (lastViewportBox == box) return
+        val isFirst = lastViewportBox == null
+        lastViewportBox = box
+
+        viewportSyncJob?.cancel()
+        viewportSyncJob = viewModelScope.launch {
+            if (!isFirst) {
+                delay(300)
+            }
+            aisRepo.setViewport(minLat, minLon, maxLat, maxLon)
+        }
+    }
+
+    private fun startViewportSyncLoop() {
+        // Kept for backward compatibility if invoked; onMapViewportChanged now triggers directly.
+    }
+
     fun updateSearch(query: String) {
         if (query.isBlank()) {
             _uiState.value = _uiState.value.copy(
@@ -803,7 +871,10 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     fun selectLifeboat(mmsi: String) {
         clearSelection()
         val lb = _uiState.value.lifeboats.find { it.mmsi == mmsi }
-        _uiState.value = _uiState.value.copy(selectedLifeboat = lb)
+        _uiState.value = _uiState.value.copy(
+            selectedLifeboat = lb,
+            selectedLifeboatTrail = aisRepo.vesselTrail(mmsi)
+        )
     }
 
     /** Focus the map on a search result. */

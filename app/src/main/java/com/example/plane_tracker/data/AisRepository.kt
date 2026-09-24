@@ -60,9 +60,89 @@ class AisRepository(private val client: OkHttpClient) {
     @Volatile
     private var lastEmitMs = 0L
 
+    /** Breadcrumb trails for each vessel's course history. */
+    private val trailRecorder = VesselTrailRecorder()
+
+    /**
+     * Viewport-driven subscription: [setViewport] stores the visible bounds
+     * (clamped/capped by [clampedViewportBox]) and re-subscribes the live
+     * socket; a fresh connect picks the same bounds up in [resubscribeMessage].
+     */
+    @Volatile
+    private var viewportBox: List<Double>? = null
+
     fun start() {
         if (webSocket != null) return
         connect()
+    }
+
+    /**
+     * Narrows the stream to the visible map area. Safe to call on every
+     * camera idle; re-subscribes only when the rounded bounds actually change.
+     * Latitudes are clamped to ±90, longitudes wrapped to ±180, and the box is
+     * capped at [MAX_BOX_SPAN_DEG] degrees per axis so a zoomed-out map can't
+     * resubscribe us back into a worldwide firehose.
+     */
+    fun setViewport(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double) {
+        val box = clampedViewportBox(minLat, minLon, maxLat, maxLon)
+        synchronized(this) {
+            if (box == viewportBox) return
+            viewportBox = box
+        }
+        // aisstream.io doesn't support changing subscriptions on the fly.
+        // Sending a new message will cause the server to close the websocket.
+        // We must cleanly close and reconnect.
+        webSocket?.close(1000, "Viewport changed")
+        webSocket = null
+        connect()
+    }
+
+    /** Falls back to the home-waters default (e.g. when the camera is unknown). */
+    fun clearViewport() {
+        synchronized(this) {
+            if (viewportBox == null) return
+            viewportBox = null
+        }
+        webSocket?.close(1000, "Viewport cleared")
+        webSocket = null
+        connect()
+    }
+
+    /** Home waters: the audience and rescue services (RNLI, KNRM, DGzRS, SSRS,
+     *  Redningsselskapet) all live here; worldwide boxes pulled in the Med and
+     *  US coasts — thousands of irrelevant messages a minute. */
+    private fun defaultBoxes(): JSONArray = JSONArray().apply {
+        // UK, Ireland, North Sea & NW Europe
+        put(JSONArray().apply {
+            put(JSONArray().apply { put(48.0); put(-12.0) })
+            put(JSONArray().apply { put(62.0); put(12.0) })
+        })
+        // Nordic / Baltic Sea
+        put(JSONArray().apply {
+            put(JSONArray().apply { put(54.0); put(4.0) })
+            put(JSONArray().apply { put(71.0); put(31.0) })
+        })
+    }
+
+    /** The subscription JSON sent on open and on every viewport change. */
+    private fun resubscribeMessage(): JSONObject = JSONObject().apply {
+        put("APIKey", com.example.plane_tracker.BuildConfig.AIS_STREAM_API_KEY)
+        put("BoundingBoxes", viewportBox?.let { box ->
+            JSONArray().apply {
+                put(JSONArray().apply {
+                    // aisstream wants [[latFrom, lonFrom], [latTo, lonTo]]
+                    put(JSONArray().apply { put(box[0]); put(box[1]) })
+                    put(JSONArray().apply { put(box[2]); put(box[3]) })
+                })
+            }
+        } ?: defaultBoxes())
+        put("FilterMessageTypes", JSONArray().apply {
+            put("PositionReport")
+            put("StandardClassBPositionReport")
+            put("ExtendedClassBPositionReport")
+            put("ShipStaticData")
+            put("StaticDataReport")
+        })
     }
 
     private fun connect() {
@@ -73,36 +153,7 @@ class AisRepository(private val client: OkHttpClient) {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "AIS stream connected")
                 reconnectAttempt = 0
-                val sub = JSONObject().apply {
-                    put("APIKey", com.example.plane_tracker.BuildConfig.AIS_STREAM_API_KEY)
-                    put("BoundingBoxes", JSONArray().apply {
-                        // Home waters only: the app's audience and its rescue
-                        // services (RNLI, KNRM, DGzRS, SSRS, Redningsselskapet)
-                        // all live here. Subscribing worldwide pulled in the
-                        // Mediterranean and US coasts — thousands of irrelevant
-                        // messages a minute — which throttled parsing, drained
-                        // battery and inflated the lifeboat count with vessels
-                        // the user will never see on the UK-centred map.
-                        // UK, Ireland, North Sea & NW Europe
-                        put(JSONArray().apply {
-                            put(JSONArray().apply { put(48.0); put(-12.0) })
-                            put(JSONArray().apply { put(62.0); put(12.0) })
-                        })
-                        // Nordic / Baltic Sea (SSRS, KNRM, DGzRS, Redningsselskapet)
-                        put(JSONArray().apply {
-                            put(JSONArray().apply { put(54.0); put(4.0) })
-                            put(JSONArray().apply { put(71.0); put(31.0) })
-                        })
-                    })
-                    put("FilterMessageTypes", JSONArray().apply {
-                        put("PositionReport")
-                        put("StandardClassBPositionReport")
-                        put("ExtendedClassBPositionReport")
-                        put("ShipStaticData")
-                        put("StaticDataReport")
-                    })
-                }
-                webSocket.send(sub.toString())
+                webSocket.send(resubscribeMessage().toString())
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -151,6 +202,9 @@ class AisRepository(private val client: OkHttpClient) {
             vessel.longitude = metaLon
             vessel.lastSeen = System.currentTimeMillis()
             updated = true
+            if (vessel.isLifeboat) {
+                trailRecorder.record(mmsi, metaLat, metaLon, vessel.lastSeen)
+            }
         }
 
         if (msg.has("Message")) {
@@ -241,7 +295,7 @@ class AisRepository(private val client: OkHttpClient) {
         // Refresh the cached lifeboat verdict only when classification inputs
         // changed — the regex is too hot to run on every position report.
         if (vessel.lifeboatCheckDirty) {
-            vessel.isLifeboat = checkIsLifeboat(vessel.name, vessel.shipType)
+            vessel.isLifeboat = checkIsLifeboat(vessel.name, vessel.callSign, vessel.shipType)
             vessel.lifeboatCheckDirty = false
             if (vessel.isLifeboat) updated = true
         }
@@ -308,18 +362,15 @@ class AisRepository(private val client: OkHttpClient) {
         }, delayMs)
     }
 
-    private fun checkIsLifeboat(name: String, type: Int): Boolean {
-        val n = name.trim()
-        if (EXCLUSIONS_REGEX.containsMatchIn(n)) {
+    private fun checkIsLifeboat(name: String, callSign: String = "", type: Int = 0): Boolean {
+        val text = "$name $callSign".trim()
+        if (EXCLUSIONS_REGEX.containsMatchIn(text)) {
             return false
         }
-        if (LIFEBOAT_REGEX.containsMatchIn(n)) {
+        if (LIFEBOAT_REGEX.containsMatchIn(text)) {
             return true
         }
-        if (type == 51 && n.isNotEmpty()) {
-            return true
-        }
-        return false
+        return type == 51
     }
 
     fun stop() {
@@ -329,11 +380,15 @@ class AisRepository(private val client: OkHttpClient) {
         mainHandler.removeCallbacksAndMessages(null)
     }
 
+    /** Bounded course trail for a vessel, oldest first (empty when unknown). */
+    fun vesselTrail(mmsi: String): List<VesselTrailPoint> = trailRecorder.trailFor(mmsi)
+
     private fun emitLifeboats() {
         val now = System.currentTimeMillis()
         // Cleanup older than 30 minutes — piggybacks on the throttled emit
         // instead of scanning every message.
         vessels.entries.removeIf { now - it.value.lastSeen > STALE_MS }
+        trailRecorder.retainAll(vessels.keys)
         _lifeboats.value = vessels.values
             .filter { it.isLifeboat && it.latitude != 0.0 && it.longitude != 0.0 }
             .map { it.copy() }
@@ -343,10 +398,44 @@ class AisRepository(private val client: OkHttpClient) {
     companion object {
         private const val TAG = "AisRepository"
         private const val STREAM_URL = "wss://stream.aisstream.io/v0/stream"
-        private const val EMIT_INTERVAL_MS = 2_000L
+
+        /**
+         * Clamps/caps a raw camera bounds rectangle into a single AIS box:
+         * [latFrom, lonFrom, latTo, lonTo]. Pure static so it's unit-testable.
+         */
+        fun clampedViewportBox(
+            minLat: Double,
+            minLon: Double,
+            maxLat: Double,
+            maxLon: Double
+        ): List<Double> {
+            val latFrom = minLat.coerceIn(-90.0, 90.0)
+            val latTo = maxLat.coerceIn(latFrom, 90.0)
+            // Normalize lon window to [-180, 180]; if the camera spans the
+            // antimeridian (maxLon < minLon) wrap the far edge past +180.
+            val lonFrom = wrapLonStatic(minLon)
+            var lonTo = wrapLonStatic(maxLon)
+            if (lonTo < lonFrom) lonTo += 360.0
+            val latSpan = (latTo - latFrom).coerceAtMost(MAX_BOX_SPAN_DEG)
+            val lonSpan = (lonTo - lonFrom).coerceAtMost(MAX_BOX_SPAN_DEG)
+            val latMid = (latFrom + latTo) / 2.0
+            val lonMid = (lonFrom + lonTo) / 2.0
+            return listOf(
+                (latMid - latSpan / 2).coerceIn(-90.0, 90.0),
+                wrapLonStatic(lonMid - lonSpan / 2),
+                (latMid + latSpan / 2).coerceIn(-90.0, 90.0),
+                wrapLonStatic(lonMid + lonSpan / 2)
+            )
+        }
+
+        private fun wrapLonStatic(lon: Double): Double =
+            ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+        private const val EMIT_INTERVAL_MS = 500L
         private const val PING_INTERVAL_S = 30L
         private const val STALE_MS = 30 * 60 * 1000L
         private const val RECONNECT_BASE_MS = 5_000L
+        /** Cap on a viewport subscription box per axis, in degrees. */
+        const val MAX_BOX_SPAN_DEG = 50.0
 
         private val LIFEBOAT_REGEX = Regex(
             "royal national lifeboat|rnli|rnli\\d*|life ?boat|reddingboot|reddingsboot|knrm|dgzrs|seenotrett.*|seenotkreuzer|seenotretter|" +
