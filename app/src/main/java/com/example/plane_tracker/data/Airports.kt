@@ -1,5 +1,7 @@
 package com.example.plane_tracker.data
 
+import com.example.plane_tracker.util.GeoMath
+
 /** Embedded airport reference for route rendering (major hubs + UK/regional coverage). */
 object Airports {
     data class Entry(
@@ -114,5 +116,21 @@ object Airports {
                 it.name.contains(q, ignoreCase = true)
             }
             .take(limit)
+    }
+
+    /** Finds the nearest airport METAR for a given lat/lon position within maxDistMeters (default 150km). */
+    fun findNearestMetar(lat: Double, lon: Double, airportWx: Map<String, Metar>, maxDistMeters: Double = 150_000.0): Metar? {
+        if (airportWx.isEmpty() || lat == 0.0 || lon == 0.0) return null
+        var bestMetar: Metar? = null
+        var bestDist = Double.MAX_VALUE
+        for ((icao, metar) in airportWx) {
+            val ap = byIcao(icao) ?: continue
+            val dist = GeoMath.distanceMeters(lat, lon, ap.lat, ap.lon)
+            if (dist < bestDist) {
+                bestDist = dist
+                bestMetar = metar
+            }
+        }
+        return if (bestDist <= maxDistMeters) bestMetar else null
     }
 }

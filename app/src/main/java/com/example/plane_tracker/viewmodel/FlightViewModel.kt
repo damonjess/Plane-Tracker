@@ -7,6 +7,7 @@ import com.example.plane_tracker.data.Aircraft
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.AirportBoard
 import com.example.plane_tracker.data.AirportBoardBuilder
+import com.example.plane_tracker.data.AisRepository
 import com.example.plane_tracker.data.EmergencyDetector
 import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.OpsCategory
@@ -18,6 +19,7 @@ import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.data.RouteInfo
 import com.example.plane_tracker.data.MapFrame
 import com.example.plane_tracker.data.RadarFrame
+import com.example.plane_tracker.data.Vessel
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.RouteProgressCalculator
@@ -31,13 +33,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.Point
 
 /** UI filter state for which planes to show. */
 data class FilterState(
-    val minAltitudeFt: Int = 0,
+    val minAltitudeFt: Int = -2000,
     val maxAltitudeFt: Int = 50_000,
     val showAirports: Boolean = true,
     val showLabels: Boolean = true,
@@ -46,7 +49,7 @@ data class FilterState(
     val showOnlyOps: Boolean = false
 ) {
     val isDefault: Boolean
-        get() = minAltitudeFt == 0 && maxAltitudeFt >= 50_000 && !showOnlyOps
+        get() = minAltitudeFt <= 0 && maxAltitudeFt >= 50_000 && !showOnlyOps
 }
 
 /** Top-level UI state exposed to Compose. */
@@ -61,6 +64,7 @@ data class TrackerUiState(
     val isLoadingDetails: Boolean = false,
     val searchQuery: String = "",
     val searchResults: List<Aircraft> = emptyList(),
+    val lifeboatSearchResults: List<Vessel> = emptyList(),
     /** Live emergency-squawk events (7700/7600/7500), minus dismissed ones. */
     val emergencies: List<EmergencyEvent> = emptyList(),
     /** Rain radar overlay state. */
@@ -87,7 +91,11 @@ data class TrackerUiState(
     val replayFlight: Aircraft? = null,
     val replayPoints: List<com.example.plane_tracker.data.FlightHistoryStore.Point> = emptyList(),
     val replayIndex: Int = 0,
-    val replayPlaying: Boolean = false
+    val replayPlaying: Boolean = false,
+    /** AIS Lifeboats. */
+    val lifeboats: List<Vessel> = emptyList(),
+    /** Currently selected lifeboat. */
+    val selectedLifeboat: Vessel? = null
 )
 
 class FlightViewModel(application: Application) : AndroidViewModel(application) {
@@ -129,6 +137,10 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Cached special-ops classification per hex (coastguard, police, military...). */
     private val opsCategories = java.util.concurrent.ConcurrentHashMap<String, OpsCategory>()
+    
+    /** WebSocket for AIS */
+    private val aisRepo = AisRepository(OkHttpClient())
+
     /** Owner names fetched from adsbdb, cached per hex. */
     private val ownerByHex = java.util.concurrent.ConcurrentHashMap<String, String>()
     /**
@@ -152,6 +164,12 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     private var opsSignature = ""
 
     init {
+        aisRepo.start()
+        viewModelScope.launch {
+            aisRepo.lifeboats.collect { lifeboats ->
+                _uiState.value = _uiState.value.copy(lifeboats = lifeboats)
+            }
+        }
         startPolling()
         startFrameTicker()
         startRadarPolling()
@@ -501,7 +519,7 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
         engine.selectedHex = null
         followingHex = null
         _uiState.value = _uiState.value.copy(
-            selected = null, routeProgress = null, isFollowing = false, isLoadingDetails = false
+            selected = null, selectedLifeboat = null, routeProgress = null, isFollowing = false, isLoadingDetails = false
         )
     }
 
@@ -736,15 +754,49 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun updateSearch(query: String) {
-        val results = if (query.isBlank()) emptyList() else {
-            val q = query.trim().uppercase()
-            engine.allAircraft(System.currentTimeMillis())
-                .filter { ac ->
-                    ac.callsign.uppercase().contains(q) || ac.icao24.uppercase().contains(q)
-                }
-                .take(8)
+        if (query.isBlank()) {
+            _uiState.value = _uiState.value.copy(
+                searchQuery = query,
+                searchResults = emptyList(),
+                lifeboatSearchResults = emptyList()
+            )
+            return
         }
-        _uiState.value = _uiState.value.copy(searchQuery = query, searchResults = results)
+        val q = query.trim().uppercase()
+        val results = engine.allAircraft(System.currentTimeMillis())
+            .filter { ac ->
+                ac.callsign.uppercase().contains(q) || ac.icao24.uppercase().contains(q)
+            }
+            .take(8)
+
+        val lbResults = _uiState.value.lifeboats
+            .filter { lb ->
+                lb.name.uppercase().contains(q) || lb.mmsi.uppercase().contains(q)
+            }
+            .take(5)
+
+        _uiState.value = _uiState.value.copy(
+            searchQuery = query,
+            searchResults = results,
+            lifeboatSearchResults = lbResults
+        )
+    }
+
+    /** Focus map on a lifeboat search result. */
+    fun focusLifeboatResult(
+        vessel: Vessel,
+        onFocused: (Double, Double) -> Unit
+    ) {
+        onFocused(vessel.latitude, vessel.longitude)
+        selectLifeboat(vessel.mmsi)
+        updateSearch("")
+    }
+
+    /** Select a lifeboat by MMSI. */
+    fun selectLifeboat(mmsi: String) {
+        clearSelection()
+        val lb = _uiState.value.lifeboats.find { it.mmsi == mmsi }
+        _uiState.value = _uiState.value.copy(selectedLifeboat = lb)
     }
 
     /** Focus the map on a search result. */

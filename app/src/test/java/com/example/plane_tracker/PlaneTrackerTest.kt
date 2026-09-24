@@ -17,6 +17,7 @@ import com.example.plane_tracker.util.ArMath
 import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.OpsCategory
+import com.example.plane_tracker.data.Vessel
 import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgressCalculator
@@ -709,5 +710,27 @@ class EmergencyHistoryTrackerTest {
         val all = tracker.all()
         assertEquals(1, all.size)
         assertTrue(all[0].active)
+    }
+
+    @Test
+    fun `vessel MMSI flag and country resolution`() {
+        val ukVessel = Vessel(mmsi = "235007795", name = "RNLI LIFEBOAT 17-42")
+        assertEquals("🇬🇧", ukVessel.countryFlagAndName.first)
+        assertEquals("United Kingdom", ukVessel.countryFlagAndName.second)
+
+        val nlVessel = Vessel(mmsi = "244690768", name = "KNRM-EDITH GRONDEL")
+        assertEquals("🇳🇱", nlVessel.countryFlagAndName.first)
+        assertEquals("Netherlands", nlVessel.countryFlagAndName.second)
+
+        val seVessel = Vessel(mmsi = "265586090", name = "RESCUE LIVBOJEN")
+        assertEquals("🇸🇪", seVessel.countryFlagAndName.first)
+        assertEquals("Sweden", seVessel.countryFlagAndName.second)
+    }
+
+    @Test
+    fun `vessel status and ship type descriptions`() {
+        val vessel = Vessel(mmsi = "235007795", shipType = 51, navStatus = 5)
+        assertEquals("Search and Rescue vessel", vessel.shipTypeText)
+        assertEquals("Moored", vessel.navStatusText)
     }
 }

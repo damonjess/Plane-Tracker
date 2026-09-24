@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.plane_tracker.data.Airports
 import com.example.plane_tracker.data.Aircraft
+import com.example.plane_tracker.data.Airport
 import com.example.plane_tracker.data.AirportBoard
 import com.example.plane_tracker.data.BoardEntry
 import com.example.plane_tracker.data.BoardKind
@@ -76,10 +77,15 @@ import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.data.SelectedFlight
+import com.example.plane_tracker.data.Vessel
+import com.example.plane_tracker.util.GeoMath
 import com.example.plane_tracker.util.RouteProgress
 import com.example.plane_tracker.util.calculateClockETA
 import com.example.plane_tracker.viewmodel.FilterState
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.roundToInt
 
 // FR24-ish palette
@@ -114,7 +120,13 @@ fun rememberElapsedSeconds(sinceMs: Long): Long {
 // ---------- Status chip ----------
 
 @Composable
-fun StatusChip(count: Int, source: String, lastUpdateMs: Long, modifier: Modifier = Modifier) {
+fun StatusChip(
+    count: Int,
+    source: String,
+    lastUpdateMs: Long,
+    lifeboatCount: Int = 0,
+    modifier: Modifier = Modifier
+) {
     val elapsed = rememberElapsedSeconds(lastUpdateMs)
     Card(
         modifier = modifier,
@@ -132,7 +144,7 @@ fun StatusChip(count: Int, source: String, lastUpdateMs: Long, modifier: Modifie
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = "✈ $count  ·  ${source.lowercase()}  ·  ${elapsed}s ago",
+                text = "✈ $count  ·  🛥 $lifeboatCount  ·  ${source.lowercase()}  ·  ${elapsed}s ago",
                 color = TextSecondary,
                 fontSize = 12.sp
             )
@@ -150,14 +162,16 @@ fun SearchOverlay(
     onQueryChange: (String) -> Unit,
     onAircraftClick: (Aircraft) -> Unit,
     onAirportClick: (Airports.Entry) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    lifeboatResults: List<Vessel> = emptyList(),
+    onLifeboatClick: (Vessel) -> Unit = {}
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         TextField(
             value = query,
             onValueChange = onQueryChange,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Search callsign, hex or airport", color = TextSecondary, fontSize = 14.sp) },
+            placeholder = { Text("Search callsign, hex, airport or lifeboat", color = TextSecondary, fontSize = 14.sp) },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = TextSecondary) },
             trailingIcon = {
                 if (query.isNotEmpty()) {
@@ -179,7 +193,7 @@ fun SearchOverlay(
             )
         )
 
-        val hasResults = aircraftResults.isNotEmpty() || airportResults.isNotEmpty()
+        val hasResults = aircraftResults.isNotEmpty() || airportResults.isNotEmpty() || lifeboatResults.isNotEmpty()
         AnimatedVisibility(visible = hasResults, enter = fadeIn(), exit = fadeOut()) {
             Card(
                 modifier = Modifier
@@ -188,7 +202,32 @@ fun SearchOverlay(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = PanelBg)
             ) {
-                LazyColumn(modifier = Modifier.height((56 * (aircraftResults.size + airportResults.size).coerceAtMost(6)).dp)) {
+                LazyColumn(modifier = Modifier.height((56 * (aircraftResults.size + airportResults.size + lifeboatResults.size).coerceAtMost(6)).dp)) {
+                    items(lifeboatResults, key = { "lb-${it.mmsi}" }) { lb ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onLifeboatClick(lb) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🛥", fontSize = 16.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    lb.name.ifBlank { "Unknown Lifeboat" },
+                                    color = TextPrimary,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    "MMSI ${lb.mmsi}  ·  ${lb.speedKnots.toInt()} kt",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
                     items(aircraftResults, key = { "ac-${it.icao24}" }) { ac ->
                         Row(
                             modifier = Modifier
@@ -302,7 +341,7 @@ fun EmergencyBanner(
 // ---------- Rain radar ----------
 
 private fun formatRadarTime(ms: Long): String =
-    java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ms))
+    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ms))
 
 /** Rain radar status pill with play/pause and the currently shown frame time. */
 @Composable
@@ -350,15 +389,53 @@ fun RadarOverlay(
 
 // ---------- Ops aircraft list ----------
 
+private enum class OpsTab { AIRCRAFT, LIFEBOATS }
+
+@Composable
+private fun OpsTabRow(selected: OpsTab, onSelect: (OpsTab) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PanelBgLight)
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        listOf(
+            OpsTab.AIRCRAFT to ("🚁" to "Aircraft"),
+            OpsTab.LIFEBOATS to ("🛥" to "Lifeboats")
+        ).forEach { (tab, labels) ->
+            val active = tab == selected
+            Column(
+                modifier = Modifier
+                    .clickable { onSelect(tab) }
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(labels.first, fontSize = 20.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    labels.second,
+                    color = if (active) Accent else TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
+                )
+            }
+        }
+    }
+}
+
 /** Sheet listing every currently-tracked blue-light / military aircraft. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OpsSheet(
     ops: List<Pair<Aircraft, OpsCategory>>,
+    lifeboats: List<Vessel>,
     ready: Boolean,
     onSelect: (Aircraft) -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onSelectLifeboat: (Vessel) -> Unit = {}
 ) {
+    var tab by remember { mutableStateOf(OpsTab.AIRCRAFT) }
     ModalBottomSheet(
         onDismissRequest = onClose,
         containerColor = PanelBgLight,
@@ -367,66 +444,112 @@ fun OpsSheet(
         Column(
             Modifier
                 .navigationBarsPadding()
-                .padding(horizontal = 20.dp)
         ) {
-            Text("Emergency services & military", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-            Text(
-                if (ready) "${ops.size} tracked aircraft in coverage" else "Connecting to the live feed…",
-                color = TextSecondary, fontSize = 12.sp
-            )
-            Spacer(Modifier.height(12.dp))
-            if (ops.isEmpty()) {
+            Column(Modifier.padding(horizontal = 20.dp)) {
+                Text("Emergency services & military", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                 Text(
-                    if (ready) {
-                        "No emergency services or military aircraft in the current feed."
-                    } else {
-                        "Scanning…"
-                    },
-                    color = TextSecondary, fontSize = 13.sp,
-                    modifier = Modifier.padding(vertical = 16.dp)
+                    if (ready) "${ops.size} tracked aircraft and ${lifeboats.size} lifeboats in coverage" else "Connecting to the live feed…",
+                    color = TextSecondary, fontSize = 12.sp
                 )
-            } else {
-                LazyColumn(modifier = Modifier.height((56 * ops.size.coerceAtMost(8)).dp)) {
-                    items(ops, key = { "ops-${it.first.icao24}" }) { (ac, cat) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onSelect(ac) }
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                Modifier
-                                    .size(34.dp)
-                                    .background(
-                                        Color(android.graphics.Color.parseColor(cat.ringColor)).copy(alpha = 0.18f),
-                                        CircleShape
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(cat.emoji, fontSize = 15.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            OpsTabRow(selected = tab, onSelect = { tab = it })
+            HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
+            
+            Column(Modifier.padding(horizontal = 20.dp)) {
+                if (tab == OpsTab.AIRCRAFT) {
+                    if (ops.isEmpty()) {
+                        Text(
+                            if (ready) {
+                                "No emergency services or military aircraft in the current feed."
+                            } else {
+                                "Scanning…"
+                            },
+                            color = TextSecondary, fontSize = 13.sp,
+                            modifier = Modifier.padding(vertical = 16.dp)
+                        )
+                    } else {
+                        LazyColumn(modifier = Modifier.height((56 * ops.size.coerceAtMost(8)).dp)) {
+                            items(ops, key = { "ops-${it.first.icao24}" }) { (ac, cat) ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSelect(ac) }
+                                        .padding(vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .size(34.dp)
+                                            .background(
+                                                Color(android.graphics.Color.parseColor(cat.ringColor)).copy(alpha = 0.18f),
+                                                CircleShape
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(cat.emoji, fontSize = 15.sp)
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            ac.callsign.ifEmpty { ac.icao24.uppercase() },
+                                            color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            listOfNotNull(
+                                                cat.label,
+                                                ac.typeCode,
+                                                ac.registration,
+                                                formatAltitudeFt(if (ac.onGround) 0 else ac.altitudeFt)
+                                            ).joinToString(" · "),
+                                            color = TextSecondary, fontSize = 11.sp, maxLines = 1
+                                        )
+                                    }
+                                }
                             }
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    ac.callsign.ifEmpty { ac.icao24.uppercase() },
-                                    color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    listOfNotNull(
-                                        cat.label,
-                                        ac.typeCode,
-                                        ac.registration,
-                                        formatAltitudeFt(if (ac.onGround) 0 else ac.altitudeFt)
-                                    ).joinToString(" · "),
-                                    color = TextSecondary, fontSize = 11.sp, maxLines = 1
-                                )
+                        }
+                    }
+                } else {
+                    if (lifeboats.isEmpty()) {
+                        Text(
+                            if (ready) {
+                                "No lifeboats in the current feed."
+                            } else {
+                                "Scanning…"
+                            },
+                            color = TextSecondary, fontSize = 13.sp,
+                            modifier = Modifier.padding(vertical = 16.dp)
+                        )
+                    } else {
+                        LazyColumn(modifier = Modifier.height((56 * lifeboats.size.coerceAtMost(8)).dp)) {
+                            items(lifeboats, key = { "ais-${it.mmsi}" }) { v ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSelectLifeboat(v) }
+                                        .padding(vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .size(34.dp)
+                                            .background(Color(android.graphics.Color.parseColor("#00bcd4")).copy(alpha = 0.18f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("🛥", fontSize = 15.sp)
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(v.name.ifBlank { "Unknown Lifeboat" }, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                                        Text("MMSI: ${v.mmsi}  ·  ${v.speedKnots.toInt()} kt", color = TextSecondary, fontSize = 12.sp)
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                Spacer(Modifier.height(20.dp))
             }
-            Spacer(Modifier.height(20.dp))
         }
     }
 }
@@ -434,7 +557,7 @@ fun OpsSheet(
 // ---------- Alert history ----------
 
 private fun formatAlertTime(ms: Long): String =
-    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(ms))
+    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(ms))
 
 /** Reviewable list of emergency-squawk events from this session. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -563,12 +686,12 @@ fun PlaybackSheet(
                             .clickable { if (playing) onPause() else onPlay() }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
-                    androidx.compose.material3.Slider(
+                    Slider(
                         value = index.toFloat(),
                         onValueChange = { onSeek(it.roundToInt()) },
                         valueRange = 0f..maxOf(1f, points.lastIndex.toFloat()),
                         modifier = Modifier.weight(1f),
-                        colors = androidx.compose.material3.SliderDefaults.colors(
+                        colors = SliderDefaults.colors(
                             thumbColor = Accent,
                             activeTrackColor = Accent,
                             inactiveTrackColor = TextSecondary.copy(alpha = 0.3f)
@@ -659,8 +782,8 @@ fun AirportSheet(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-                            .format(java.util.Date()) + " local · now",
+                        SimpleDateFormat("HH:mm", Locale.getDefault())
+                            .format(Date()) + " local · now",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -1184,8 +1307,8 @@ private fun DataCell(label: String, value: String, modifier: Modifier = Modifier
 
 @Composable
 private fun RouteHeader(
-    origin: com.example.plane_tracker.data.Airport?,
-    destination: com.example.plane_tracker.data.Airport?
+    origin: Airport?,
+    destination: Airport?
 ) {
     Row(
         modifier = Modifier
@@ -1285,8 +1408,8 @@ private fun RouteProgressBar(progress: RouteProgress?) {
 
 @Composable
 private fun RouteStatsStrip(
-    origin: com.example.plane_tracker.data.Airport?,
-    destination: com.example.plane_tracker.data.Airport?,
+    origin: Airport?,
+    destination: Airport?,
     progress: RouteProgress?
 ) {
     val text = if (progress != null) {
@@ -1302,7 +1425,7 @@ private fun RouteStatsStrip(
         val o = origin?.latitude?.let { lat -> origin.longitude?.let { lon -> lat to lon } }
         val d = destination?.latitude?.let { lat -> destination.longitude?.let { lon -> lat to lon } }
         if (o != null && d != null) {
-            val totalKm = com.example.plane_tracker.util.GeoMath.distanceMeters(
+            val totalKm = GeoMath.distanceMeters(
                 o.first, o.second, d.first, d.second
             ) / 1000.0
             "${totalKm.roundToInt()} km total route"
@@ -1359,7 +1482,7 @@ fun FilterSheet(
                         )
                     )
                 },
-                valueRange = 0f..50_000f,
+                valueRange = -2000f..50_000f,
                 colors = SliderDefaults.colors(
                     thumbColor = Accent,
                     activeTrackColor = Accent,
@@ -1415,5 +1538,224 @@ private fun FilterToggle(label: String, checked: Boolean, onChecked: (Boolean) -
     ) {
         Text(label, color = TextPrimary, fontSize = 14.sp)
         Switch(checked = checked, onCheckedChange = onChecked)
+    }
+}
+
+// ---------- Lifeboat details panel ----------
+
+@Composable
+fun LifeboatDetailsPanel(
+    vessel: Vessel,
+    metar: Metar? = null,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = true,
+        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+        modifier = modifier
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            colors = CardDefaults.cardColors(containerColor = PanelBg),
+            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+            ) {
+                // Drag handle
+                Box(
+                    Modifier
+                        .padding(top = 8.dp)
+                        .align(Alignment.CenterHorizontally)
+                ) {
+                    Box(
+                        Modifier
+                            .width(40.dp)
+                            .height(4.dp)
+                            .background(TextSecondary.copy(alpha = 0.4f), RoundedCornerShape(2.dp))
+                    )
+                }
+
+                // Header
+                val (flagEmoji, countryName) = vessel.countryFlagAndName
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "$flagEmoji ${vessel.name.ifBlank { "Unknown Lifeboat" }}",
+                            color = TextPrimary,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "🛥 ${vessel.shipTypeText}  ·  MMSI ${vessel.mmsi}",
+                            color = Color(0xFF00BCD4),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close", tint = TextSecondary)
+                    }
+                }
+
+                HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
+
+                // 3-Column Top Stat Strip: Speed | Course | Received
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                        Text("Speed", color = TextSecondary, fontSize = 11.sp)
+                        Text(
+                            formatSpeedKt(vessel.speedKnots.toInt()),
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                        Text("Course", color = TextSecondary, fontSize = 11.sp)
+                        Text(
+                            if (vessel.heading > 0 && vessel.heading <= 360) "${vessel.heading.roundToInt()}°" else "---",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                        Text("Received", color = TextSecondary, fontSize = 11.sp)
+                        Text(
+                            formatReceivedTime(vessel.lastSeen),
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
+
+                // Destination / Location / Status Card
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .background(Color(0xFF0288D1).copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                        .padding(14.dp)
+                ) {
+                    Column {
+                        if (vessel.destination.isNotBlank()) {
+                            Text(
+                                vessel.destination.uppercase(),
+                                color = Color(0xFF4FC3F7),
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "$flagEmoji $countryName  ·  ${vessel.navStatusText}",
+                                color = TextSecondary,
+                                fontSize = 12.sp
+                            )
+                        } else {
+                            Text(
+                                "$flagEmoji $countryName",
+                                color = TextPrimary,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "Status: ${vessel.navStatusText}",
+                                color = TextSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+
+                // Data grid (Only real data, NO fake placeholders!)
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(Modifier.fillMaxWidth()) {
+                        DataCell("Type", vessel.shipTypeText, Modifier.weight(1f))
+                        DataCell("Status", vessel.navStatusText, Modifier.weight(1f))
+                    }
+                    val showDraught = vessel.draught > 0.0
+                    val showSize = vessel.lengthMeters > 0 && vessel.widthMeters > 0
+                    if (showDraught || showSize) {
+                        Row(Modifier.fillMaxWidth()) {
+                            if (showDraught) {
+                                DataCell("Draught", "${vessel.draught} m", Modifier.weight(1f))
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                            if (showSize) {
+                                DataCell("Size", "${vessel.lengthMeters} x ${vessel.widthMeters} m", Modifier.weight(1f))
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    val showCallSign = vessel.callSign.isNotBlank()
+                    val showImo = vessel.imoNumber > 0
+                    if (showCallSign || showImo) {
+                        Row(Modifier.fillMaxWidth()) {
+                            if (showCallSign) {
+                                DataCell("Call Sign", vessel.callSign, Modifier.weight(1f))
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                            if (showImo) {
+                                DataCell("IMO", "${vessel.imoNumber}", Modifier.weight(1f))
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+
+                    // Weather row: ONLY shown when real nearest METAR is available (no fake placeholders!)
+                    if (metar != null) {
+                        HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f), modifier = Modifier.padding(vertical = 4.dp))
+                        Column {
+                            Text("WEATHER AT POSITION", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                "${metar.tempC?.roundToInt() ?: "—"}°C  ·  Wind ${formatWind(metar)}  ·  ${metar.condition}",
+                                color = TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+        }
+    }
+}
+
+private fun formatReceivedTime(lastSeenMs: Long): String {
+    if (lastSeenMs <= 0L) return "Just now"
+    val diffSec = ((System.currentTimeMillis() - lastSeenMs) / 1000).coerceAtLeast(0)
+    return when {
+        diffSec < 60 -> "${diffSec}s ago"
+        diffSec < 3600 -> "${diffSec / 60}m, ${diffSec % 60}s ago"
+        else -> {
+            val hours = diffSec / 3600
+            val mins = (diffSec % 3600) / 60
+            "${hours}h, ${mins}m ago"
+        }
     }
 }

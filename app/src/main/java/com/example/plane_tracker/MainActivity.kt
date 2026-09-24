@@ -43,6 +43,7 @@ import com.example.plane_tracker.ui.EmergencyBanner
 import com.example.plane_tracker.ui.OpsSheet
 import com.example.plane_tracker.ui.PlaybackSheet
 import com.example.plane_tracker.ui.FlightDetailsPanel
+import com.example.plane_tracker.ui.LifeboatDetailsPanel
 import com.example.plane_tracker.ui.FilterSheet
 import com.example.plane_tracker.ui.FollowingChip
 import com.example.plane_tracker.ui.MapControls
@@ -104,6 +105,12 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 viewModel.openAirportPage(entry)
             }
         }
+        mapManager.onVesselTapped = { mmsi ->
+            viewModel.selectLifeboat(mmsi)
+            viewModel.uiState.value.selectedLifeboat?.let { lb ->
+                mapManager.flyTo(lb.latitude, lb.longitude, 11.0)
+            }
+        }
     }
 
     // Push render frames to the map
@@ -129,8 +136,8 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
 
     // Apply camera padding so selected aircraft center in open map space above details card
     val density = LocalDensity.current
-    LaunchedEffect(uiState.selected != null, uiState.isFollowing) {
-        if (uiState.selected != null && !uiState.isFollowing) {
+    LaunchedEffect(uiState.selected != null, uiState.selectedLifeboat != null, uiState.isFollowing) {
+        if ((uiState.selected != null || uiState.selectedLifeboat != null) && !uiState.isFollowing) {
             val topPx = with(density) { 90.dp.roundToPx() }
             val bottomPx = with(density) { 360.dp.roundToPx() }
             mapManager.setPadding(0, topPx, 0, bottomPx)
@@ -186,6 +193,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 airportResults = remember(uiState.searchQuery) {
                     Airports.search(uiState.searchQuery)
                 },
+                lifeboatResults = uiState.lifeboatSearchResults,
                 onQueryChange = viewModel::updateSearch,
                 onAircraftClick = { ac ->
                     viewModel.focusSearchResult(
@@ -198,6 +206,12 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                     mapManager.flyTo(ap.lat, ap.lon, 11.0)
                     viewModel.openAirportPage(ap)
                     viewModel.updateSearch("")
+                },
+                onLifeboatClick = { lb ->
+                    viewModel.focusLifeboatResult(
+                        lb,
+                        onFocused = { lat, lon -> mapManager.flyTo(lat, lon, 11.0) }
+                    )
                 }
             )
 
@@ -211,7 +225,8 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                 StatusChip(
                     count = uiState.aircraftCount,
                     source = uiState.source,
-                    lastUpdateMs = uiState.lastUpdateMs
+                    lastUpdateMs = uiState.lastUpdateMs,
+                    lifeboatCount = uiState.lifeboats.size
                 )
 
                 if (uiState.isFollowing) {
@@ -258,6 +273,11 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         // Push emergency positions to their map pulse layer
         LaunchedEffect(uiState.emergencies) {
             mapManager.updateEmergencies(uiState.emergencies)
+        }
+
+        // Push AIS vessels to map
+        LaunchedEffect(uiState.lifeboats) {
+            mapManager.updateVessels(uiState.lifeboats)
         }
 
         // Sync flight replay track and active position to the map
@@ -315,6 +335,17 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
+            uiState.selectedLifeboat?.let { selectedLifeboat ->
+                val metar = remember(selectedLifeboat.mmsi, selectedLifeboat.latitude, selectedLifeboat.longitude, uiState.airportWx) {
+                    Airports.findNearestMetar(selectedLifeboat.latitude, selectedLifeboat.longitude, uiState.airportWx)
+                }
+                LifeboatDetailsPanel(
+                    vessel = selectedLifeboat,
+                    metar = metar,
+                    onClose = viewModel::clearSelection,
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
+            }
         }
 
         // AR sky view (full-screen camera overlay)
@@ -346,11 +377,19 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         if (opsOpen) {
             OpsSheet(
                 ops = uiState.opsAircraft,
+                lifeboats = uiState.lifeboats,
                 ready = uiState.opsReady,
                 onSelect = { ac ->
                     opsOpen = false
                     viewModel.focusSearchResult(
                         ac,
+                        onFocused = { lat, lon -> mapManager.flyTo(lat, lon, 11.0) }
+                    )
+                },
+                onSelectLifeboat = { lb ->
+                    opsOpen = false
+                    viewModel.focusLifeboatResult(
+                        lb,
                         onFocused = { lat, lon -> mapManager.flyTo(lat, lon, 11.0) }
                     )
                 },

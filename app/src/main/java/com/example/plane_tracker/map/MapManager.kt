@@ -13,6 +13,7 @@ import com.example.plane_tracker.data.AltitudeColors
 import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.MapFrame
 import com.example.plane_tracker.data.RadarFrame
+import com.example.plane_tracker.data.Vessel
 import com.example.plane_tracker.util.GeoMath
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
@@ -68,6 +69,7 @@ class MapManager(context: Context) {
     private lateinit var trailSource: GeoJsonSource
     private lateinit var courseSource: GeoJsonSource
     private lateinit var emergencySource: GeoJsonSource
+    private lateinit var vesselsSource: GeoJsonSource
     private var radarUrl: String? = null
     /** Ping-pong slot for smooth radar crossfades: 0 = layer-a, 1 = layer-b. */
     private var radarSlot = 1
@@ -79,6 +81,8 @@ class MapManager(context: Context) {
     var onPlaneTapped: ((String) -> Unit)? = null
     /** Called when an airport dot is tapped (receives IATA code). */
     var onAirportTapped: ((String) -> Unit)? = null
+    /** Called when a lifeboat symbol is tapped (receives MMSI). */
+    var onVesselTapped: ((String) -> Unit)? = null
     /** Called for taps on empty map area. */
     var onMapTapped: (() -> Unit)? = null
     /** Called when camera pitch/tilt changes (true = 3D tilted). */
@@ -137,6 +141,9 @@ class MapManager(context: Context) {
         style.addSource(airportsSource)
         emergencySource = GeoJsonSource("emergency-source")
         style.addSource(emergencySource)
+        
+        vesselsSource = GeoJsonSource("vessels-source")
+        style.addSource(vesselsSource)
 
         // --- Airport layers (bottom of stack, hidden by default) ---
         style.addLayer(
@@ -316,6 +323,17 @@ class MapManager(context: Context) {
                 .withFilter(Expression.has("ops"))
         )
 
+        // --- AIS Lifeboats ---
+        style.addLayer(
+            SymbolLayer("vessels-layer", "vessels-source")
+                .withProperties(
+                    PropertyFactory.iconImage("badge-LIFEBOAT"),
+                    PropertyFactory.iconAllowOverlap(true),
+                    PropertyFactory.iconIgnorePlacement(true),
+                    PropertyFactory.iconSize(1.0f)
+                )
+        )
+
         // --- Airport weather chips (IATA + condition, toggleable) ---
         style.addLayer(
             SymbolLayer("airport-wx", "airports-source")
@@ -348,6 +366,15 @@ class MapManager(context: Context) {
             val hex = features[0].getStringProperty("hex")
             if (!hex.isNullOrEmpty()) {
                 onPlaneTapped?.invoke(hex)
+                return
+            }
+        }
+        // Vessel / Lifeboat symbols
+        val vesselFeatures = m.queryRenderedFeatures(rect, "vessels-layer")
+        if (vesselFeatures.isNotEmpty()) {
+            val mmsi = vesselFeatures[0].getStringProperty("mmsi")
+            if (!mmsi.isNullOrEmpty()) {
+                onVesselTapped?.invoke(mmsi)
                 return
             }
         }
@@ -454,6 +481,20 @@ class MapManager(context: Context) {
                     }
                 )
             )
+        }
+    }
+
+    /** Updates the map with marine lifeboats from AIS. */
+    fun updateVessels(vessels: List<Vessel>) {
+        requireMain {
+            if (!styleReady || map == null) return@requireMain
+            val features = vessels.map { v ->
+                val feature = Feature.fromGeometry(Point.fromLngLat(v.longitude, v.latitude))
+                feature.addStringProperty("mmsi", v.mmsi)
+                feature.addStringProperty("name", v.name)
+                feature
+            }
+            vesselsSource.setGeoJson(FeatureCollection.fromFeatures(features))
         }
     }
 

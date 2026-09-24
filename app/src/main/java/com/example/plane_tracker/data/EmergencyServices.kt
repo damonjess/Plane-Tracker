@@ -21,7 +21,7 @@ object OpsClassifier {
     private val patterns: List<Pair<Regex, OpsCategory>> = listOf(
         Regex(
             "royal national lifeboat|rnli|rnli\\d*|life ?boat|reddingboot|reddingsboot|knrm|dgzrs|seenotrett*|seenotkreuzer|seenotretter|" +
-                "snsm|redningsselskapet|redningsskøyte|sjöräddningssällskapet|\\bssrs\\b|\\bnsri\\b|rcmsar|marine rescue|volunteer marine rescue|sea rescue",
+                "snsm|redningsselskapet|redningsskøyte|sjöräddningssällskapet|\\bssrs\\b|\\bnsri\\b|rcmsar|marine rescue|volunteer marine rescue|sea rescue|\\bpolmarine\\b|\\bpolmar\\b|water police",
             IGNORE_CASE
         ) to OpsCategory.LIFEBOAT,
         Regex(
@@ -51,7 +51,8 @@ object OpsClassifier {
                 "guardia civil|gendarmerie|police nationale|polizia|polizia di stato|carabinieri|guardia di finanza|\\bgdf\\b|policia|polícia militar|polícia civil|polícia federal|policja|" +
                 "trooper|state police|state patrol|highway patrol|sheriff'?s?|lapd|nypd|cpd|\\bdps\\b|\\bchp\\b|\\blasd\\b|\\bbso\\b|\\bpbso\\b|\\bpolair\\d*|rcmp|gendarmerie royale|ontario provincial police|\\bopp\\b|surete du quebec|\\bsq\\b|saps|" +
                 "G-?MPS[A-Z]|G-?POL[A-Z]|G-?NPA[A-Z]|G-?NWO[A-Z]|G-?SUA[A-Z]|G-?GMP[A-Z]|G-?SYP[A-Z]|G-?WMP[A-Z]|G-?TVP[A-Z]|G-?DVP[A-Z]|G-?HMP[A-Z]|G-?COP[A-Z]|G-?PSN[A-Z]|G-?VPNI|G-?RPA[A-Z]|G-?DPAS|G-?AASU|G-?PASU|G-?SPOL|" +
-                "PH-PX[A-Z]|D-HX[A-Z]{2}|D-HV[A-Z]{2}|D-HBP[A-Z]|D-HEPS|D-HPOL|D-HUTH|DHYAC|OE-BX[A-Z]|SE-JP[A-Z]|SE-HP[A-Z]|F-MJ[A-Z]{2}|LN-ORW|LN-ORX|LN-RWP",
+                "PH-PX[A-Z]|D-HX[A-Z]{2}|D-HV[A-Z]{2}|D-HBP[A-Z]|D-HEPS|D-HPOL|D-HUTH|DHYAC|OE-BX[A-Z]|SE-JP[A-Z]|SE-HP[A-Z]|F-MJ[A-Z]{2}|LN-ORW|LN-ORX|LN-RWP|" +
+                "\\blaw enforcement\\b",
             IGNORE_CASE
         ) to OpsCategory.POLICE,
         Regex(

@@ -88,4 +88,33 @@ object GeoMath {
         }
         return points
     }
+
+    /** Resolves country flag emoji and country name from MMSI Maritime Identification Digits (MID). */
+    fun getFlagAndCountryFromMmsi(mmsi: String): Pair<String, String> {
+        val cleanMmsi = mmsi.trim()
+        if (cleanMmsi.length < 3) return "⚓" to "International"
+        val mid = cleanMmsi.substring(0, 3).toIntOrNull() ?: return "⚓" to "International"
+        return when (mid) {
+            232, 233, 234, 235 -> "🇬🇧" to "United Kingdom"
+            244, 245, 246 -> "🇳🇱" to "Netherlands"
+            211, 218 -> "🇩🇪" to "Germany"
+            226, 227, 228 -> "🇫🇷" to "France"
+            265, 266 -> "🇸🇪" to "Sweden"
+            257, 258, 259 -> "🇳🇴" to "Norway"
+            219, 220 -> "🇩🇰" to "Denmark"
+            230 -> "🇫🇮" to "Finland"
+            205 -> "🇧🇪" to "Belgium"
+            247 -> "🇮🇹" to "Italy"
+            224, 225 -> "🇪🇸" to "Spain"
+            263 -> "🇵🇹" to "Portugal"
+            250 -> "🇮🇪" to "Ireland"
+            338, 366, 367, 368, 369 -> "🇺🇸" to "United States"
+            316 -> "🇨🇦" to "Canada"
+            503 -> "🇦🇺" to "Australia"
+            512 -> "🇳🇿" to "New Zealand"
+            601 -> "🇿🇦" to "South Africa"
+            273 -> "🇷🇺" to "Russia"
+            else -> "⚓" to "Maritime ($mid)"
+        }
+    }
 }
