@@ -106,7 +106,7 @@ class MapManager(context: Context) {
                         true
                     }
                     map.addOnCameraIdleListener {
-                        val isTilted = (map.cameraPosition.tilt ?: 0.0) > 10.0
+                        val isTilted = map.cameraPosition.tilt > 10.0
                         onCameraTiltChanged?.invoke(isTilted)
                     }
                     map.cameraPosition = CameraPosition.Builder()
@@ -339,9 +339,9 @@ class MapManager(context: Context) {
                     PropertyFactory.iconSize(
                         Expression.interpolate(
                             Expression.linear(), Expression.zoom(),
-                            Expression.stop(4.0, 0.55f),
-                            Expression.stop(10.0, 0.85f),
-                            Expression.stop(14.0, 1.1f)
+                            Expression.stop(3.0, 0.75f),
+                            Expression.stop(8.0, 1.05f),
+                            Expression.stop(14.0, 1.5f)
                         )
                     ),
                     PropertyFactory.iconRotate(Expression.get("heading")),
@@ -470,7 +470,7 @@ class MapManager(context: Context) {
 
             frame.followPos?.let { follow ->
                 val m = map ?: return@let
-                val currentTilt = m.cameraPosition.tilt ?: 0.0
+                val currentTilt = m.cameraPosition.tilt
                 if (currentTilt > 10.0 && frame.followHeading != null) {
                     val currentZoom = (m.cameraPosition.zoom ?: 13.0).coerceAtLeast(11.0)
                     val cameraPosition = CameraPosition.Builder()
@@ -842,51 +842,52 @@ fun createPlaneBitmap(colorHex: String): Bitmap {
 }
 
 /**
- * Renders the RNLI-style lifeboat marker: an orange boat hull pointing up
- * (0° = north) inside a white ring on a dark disc, like the plane icons.
+ * Renders the RNLI-style lifeboat marker: a large orange boat hull pointing
+ * up (0° = north) inside a thick white ring on a navy disc. Sized and
+ * brightened to stay clearly visible at country-wide zooms on the dark map.
  */
 fun createLifeboatBitmap(): Bitmap {
-    val size = 48
+    val size = 60
     val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
     val cx = size / 2f
 
-    // Dark disc background (matches the ops badge look)
+    // Opaque navy disc — reads clearly against the dark-matter basemap
     val bg = Paint().apply {
-        color = AndroidColor.parseColor("#EE10141A")
+        color = AndroidColor.parseColor("#F0152735")
         style = Paint.Style.FILL
         isAntiAlias = true
     }
     canvas.drawCircle(cx, cx, cx - 1f, bg)
 
-    // White ring
+    // Thick white ring — the main visibility carrier at low zoom
     val ring = Paint().apply {
         color = AndroidColor.WHITE
         style = Paint.Style.STROKE
-        strokeWidth = 2.5f
+        strokeWidth = 3.5f
         isAntiAlias = true
     }
-    canvas.drawCircle(cx, cx, cx - 2.5f, ring)
+    canvas.drawCircle(cx, cx, cx - 3.5f, ring)
 
-    // Orange RNLI-style hull: pointed bow at top, flat stern at bottom
+    // Bright orange RNLI-style hull: pointed bow at top, flat stern at bottom
     val hull = Paint().apply {
-        color = AndroidColor.parseColor("#FF6B1A")
+        color = AndroidColor.parseColor("#FF7A1A")
         style = Paint.Style.FILL
         isAntiAlias = true
     }
     val hullEdge = Paint().apply {
-        color = AndroidColor.parseColor("#B33F00")
+        color = AndroidColor.parseColor("#7A2E00")
         style = Paint.Style.STROKE
-        strokeWidth = 1.5f
+        strokeWidth = 2f
         isAntiAlias = true
         strokeJoin = Paint.Join.ROUND
     }
     val path = Path().apply {
-        moveTo(cx, 9f)                 // bow
-        lineTo(cx + 6.5f, 22f)         // starboard shoulder
-        lineTo(cx + 5.5f, 33f)         // starboard quarter
-        lineTo(cx - 5.5f, 33f)         // stern
-        lineTo(cx - 6.5f, 22f)         // port shoulder
+        moveTo(cx, 11f)                // bow
+        lineTo(cx + 8f, 25f)           // starboard shoulder
+        lineTo(cx + 7f, 38f)           // starboard quarter
+        lineTo(cx - 7f, 38f)           // stern
+        lineTo(cx - 8f, 25f)           // port shoulder
         close()
     }
     canvas.drawPath(path, hull)
@@ -898,7 +899,16 @@ fun createLifeboatBitmap(): Bitmap {
         style = Paint.Style.FILL
         isAntiAlias = true
     }
-    canvas.drawRoundRect(cx - 3f, 24f, cx + 3f, 30f, 1.5f, 1.5f, cabin)
+    canvas.drawRoundRect(cx - 4f, 28f, cx + 4f, 36f, 2f, 2f, cabin)
+
+    // White deck stripe just behind the bow for extra contrast
+    val stripe = Paint().apply {
+        color = AndroidColor.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f
+        isAntiAlias = true
+    }
+    canvas.drawLine(cx - 5.5f, 24f, cx + 5.5f, 24f, stripe)
 
     return bitmap
 }

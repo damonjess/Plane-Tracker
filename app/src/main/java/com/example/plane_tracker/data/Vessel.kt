@@ -46,11 +46,12 @@ data class Vessel(
     /** Friendly ship type description. */
     val shipTypeText: String
         get() = when (shipType) {
-            51 -> "Search and Rescue vessel"
             50 -> "Pilot Vessel"
             52 -> "Tug"
             53 -> "Port Tender"
             55 -> "Law Enforcement"
-            else -> "Lifeboat"
+            // 51 (SAR) and unknown: AIS lifeboats rarely broadcast a type,
+            // and every vessel here is rescue-fleet, so default to the SAR label.
+            else -> "Search and Rescue vessel"
         }
 }

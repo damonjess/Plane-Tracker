@@ -76,6 +76,13 @@ class AisRepository(private val client: OkHttpClient) {
                 val sub = JSONObject().apply {
                     put("APIKey", com.example.plane_tracker.BuildConfig.AIS_STREAM_API_KEY)
                     put("BoundingBoxes", JSONArray().apply {
+                        // Home waters only: the app's audience and its rescue
+                        // services (RNLI, KNRM, DGzRS, SSRS, Redningsselskapet)
+                        // all live here. Subscribing worldwide pulled in the
+                        // Mediterranean and US coasts — thousands of irrelevant
+                        // messages a minute — which throttled parsing, drained
+                        // battery and inflated the lifeboat count with vessels
+                        // the user will never see on the UK-centred map.
                         // UK, Ireland, North Sea & NW Europe
                         put(JSONArray().apply {
                             put(JSONArray().apply { put(48.0); put(-12.0) })
@@ -85,21 +92,6 @@ class AisRepository(private val client: OkHttpClient) {
                         put(JSONArray().apply {
                             put(JSONArray().apply { put(54.0); put(4.0) })
                             put(JSONArray().apply { put(71.0); put(31.0) })
-                        })
-                        // Mediterranean & SW Europe
-                        put(JSONArray().apply {
-                            put(JSONArray().apply { put(35.0); put(-10.0) })
-                            put(JSONArray().apply { put(46.0); put(36.0) })
-                        })
-                        // North America East Coast & Gulf
-                        put(JSONArray().apply {
-                            put(JSONArray().apply { put(24.0); put(-98.0) })
-                            put(JSONArray().apply { put(48.0); put(-65.0) })
-                        })
-                        // Australia & NZ
-                        put(JSONArray().apply {
-                            put(JSONArray().apply { put(-45.0); put(110.0) })
-                            put(JSONArray().apply { put(-10.0); put(180.0) })
                         })
                     })
                     put("FilterMessageTypes", JSONArray().apply {
@@ -344,6 +336,7 @@ class AisRepository(private val client: OkHttpClient) {
         vessels.entries.removeIf { now - it.value.lastSeen > STALE_MS }
         _lifeboats.value = vessels.values
             .filter { it.isLifeboat && it.latitude != 0.0 && it.longitude != 0.0 }
+            .map { it.copy() }
             .toList()
     }
 

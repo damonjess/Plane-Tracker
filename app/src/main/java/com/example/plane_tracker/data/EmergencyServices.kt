@@ -20,7 +20,7 @@ object OpsClassifier {
     /** Call-sign, registration, operator and owner patterns in priority order. */
     private val patterns: List<Pair<Regex, OpsCategory>> = listOf(
         Regex(
-            "royal national lifeboat|rnli|rnli\\d*|life ?boat|reddingboot|reddingsboot|knrm|dgzrs|seenotrett*|seenotkreuzer|seenotretter|" +
+            "royal national lifeboat|rnli|rnli\\d*|life ?boat|reddingboot|reddingsboot|knrm|dgzrs|seenotrett.*|seenotkreuzer|seenotretter|" +
                 "snsm|redningsselskapet|redningsskøyte|sjöräddningssällskapet|\\bssrs\\b|\\bnsri\\b|rcmsar|marine rescue|volunteer marine rescue|sea rescue|\\bpolmarine\\b|\\bpolmar\\b|water police",
             IGNORE_CASE
         ) to OpsCategory.LIFEBOAT,
@@ -28,7 +28,7 @@ object OpsClassifier {
             "coastguard|coast guard|h\\.?m\\.? coastguard|his majesty.?s coastguard|her majesty.?s coastguard|hmcg|" +
                 "kustwacht|salvamento|sasemar|irish coast guard|us coast guard|\\buscg\\b|" +
                 "search and rescue|\\bsar\\b|rescue helicopter|bristow|2excel|" +
-                "\\bRESCUE\\b|\\bSAR\\b|\\bCGC\\b|\\bSRG\\b|G-RESA|C-GFMX|C-GFMQ|C-GCFK|G-MCG[A-Z]",
+                "\\bRESCUE\\b|rescue\\s*\\d+|\\bSAR\\b|\\bCGC\\b|\\bCGI\\d+\\b|\\bSRG\\b|G-RESA|C-GFMX|C-GFMQ|C-GCFK|G-MCG[A-Z]",
             IGNORE_CASE
         ) to OpsCategory.COASTGUARD,
         Regex(

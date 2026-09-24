@@ -167,7 +167,14 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
         aisRepo.start()
         viewModelScope.launch {
             aisRepo.lifeboats.collect { lifeboats ->
-                _uiState.value = _uiState.value.copy(lifeboats = lifeboats)
+                val currentSelected = _uiState.value.selectedLifeboat
+                val updatedSelected = currentSelected?.let { sel ->
+                    lifeboats.find { it.mmsi == sel.mmsi } ?: sel
+                }
+                _uiState.value = _uiState.value.copy(
+                    lifeboats = lifeboats,
+                    selectedLifeboat = updatedSelected
+                )
             }
         }
         startPolling()
@@ -888,5 +895,10 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     fun pauseReplay() {
         replayJob?.cancel()
         _uiState.value = _uiState.value.copy(replayPlaying = false)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        aisRepo.stop()
     }
 }

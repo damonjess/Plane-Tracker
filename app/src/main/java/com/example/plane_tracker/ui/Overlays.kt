@@ -83,7 +83,6 @@ import com.example.plane_tracker.data.EmergencyHistoryTracker
 import com.example.plane_tracker.data.FlightHistoryStore
 import com.example.plane_tracker.data.Metar
 import com.example.plane_tracker.data.OpsCategory
-import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.RadarFrame
 import com.example.plane_tracker.data.WeatherMapper
 import com.example.plane_tracker.data.SelectedFlight
@@ -1784,16 +1783,15 @@ private fun VesselDataGrid(vessel: Vessel, metar: Metar?) {
             }
         }
         GridDivider()
+        // Status gets a full-width line: nav statuses like "Under way using engine"
+        // never fit a half column without truncating.
         LabeledValueRow {
-            LabeledValue("Status", vessel.navStatusText, Modifier.weight(1f))
-            if (vessel.callSign.isNotBlank()) {
-                LabeledValue("Call Sign", vessel.callSign, Modifier.weight(1f))
-            } else {
-                Spacer(Modifier.weight(1f))
-            }
+            LabeledValue("Status", vessel.navStatusText)
         }
         val showSize = vessel.lengthMeters > 0 && vessel.widthMeters > 0
-        if (showSize || vessel.imoNumber > 0) {
+        val showCallSign = vessel.callSign.isNotBlank()
+        val showImo = vessel.imoNumber > 0
+        if (showSize || showCallSign || showImo) {
             GridDivider()
             LabeledValueRow {
                 if (showSize) {
@@ -1801,10 +1799,17 @@ private fun VesselDataGrid(vessel: Vessel, metar: Metar?) {
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
-                if (vessel.imoNumber > 0) {
+                if (showCallSign) {
+                    LabeledValue("Call Sign", vessel.callSign, Modifier.weight(1f))
+                } else if (showImo) {
                     LabeledValue("IMO", "${vessel.imoNumber}", Modifier.weight(1f))
                 } else {
                     Spacer(Modifier.weight(1f))
+                }
+            }
+            if (showSize && showCallSign && showImo) {
+                LabeledValueRow {
+                    LabeledValue("IMO", "${vessel.imoNumber}")
                 }
             }
         }
@@ -1812,10 +1817,16 @@ private fun VesselDataGrid(vessel: Vessel, metar: Metar?) {
         // Weather row: ONLY shown when a real nearest METAR is available.
         if (metar != null) {
             GridDivider()
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Row(Modifier.weight(1f)) {
-                    LabeledValue("Temp", formatVesselTemp(metar), Modifier.weight(1f))
-                    LabeledValue("Wind", formatVesselWind(metar), Modifier.weight(1f))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    LabeledValue("Temp", formatVesselTemp(metar))
+                    Spacer(Modifier.height(6.dp))
+                    LabeledValue("Wind", formatVesselWind(metar))
                 }
                 CompassDial(
                     degrees = metar.windFromDeg ?: vessel.heading.roundToInt(),
@@ -1905,7 +1916,7 @@ private val COMPASS_POINTS = arrayOf(
     "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
 )
 
-private fun compassPoint(deg: Int): String = COMPASS_POINTS[Math.floorMod(deg, 360) / 22 % 16]
+private fun compassPoint(deg: Int): String = COMPASS_POINTS[((Math.floorMod(deg, 360) * 2 + 22) / 45) % 16]
 
 private fun formatVesselWind(metar: Metar): String = when {
     metar.windSpeedKt == null || metar.windSpeedKt == 0 -> "Calm"

@@ -516,6 +516,13 @@ class OpsClassifierTest {
         assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("Coastguard", "G-RESA"), null))
         assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("Kustwacht", "C-GCFK"), null))
 
+        // Irish Coast Guard helicopters: Rescue 116 (CGI116 / EI-IRO) and
+        // Rescue 115 (CGI115 / EI-ICR) carry no owner string in adsbdb.
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("CGI116", "EI-IRO"), null))
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("CGI115", "EI-ICR"), null))
+        // Norwegian 330 Squadron SAR helicopters broadcast RESCUExxx callsigns.
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("RESCUE116"), null))
+
         // Lifeboat
         assertEquals(OpsCategory.LIFEBOAT, OpsClassifier.classify(acWith("RNLI 17-42"), "Royal National Lifeboat Institution"))
         assertEquals(OpsCategory.LIFEBOAT, OpsClassifier.classify(acWith("Reddingboot"), "KNRM"))
