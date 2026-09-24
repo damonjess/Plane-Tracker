@@ -355,7 +355,7 @@ fun RadarOverlay(
 @Composable
 fun OpsSheet(
     ops: List<Pair<Aircraft, OpsCategory>>,
-    loading: Boolean,
+    ready: Boolean,
     onSelect: (Aircraft) -> Unit,
     onClose: () -> Unit
 ) {
@@ -371,13 +371,17 @@ fun OpsSheet(
         ) {
             Text("Emergency services & military", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
             Text(
-                "${ops.size} tracked aircraft in coverage",
+                if (ready) "${ops.size} tracked aircraft in coverage" else "Connecting to the live feed…",
                 color = TextSecondary, fontSize = 12.sp
             )
             Spacer(Modifier.height(12.dp))
             if (ops.isEmpty()) {
                 Text(
-                    if (loading) "Scanning…" else "None in range right now.",
+                    if (ready) {
+                        "No emergency services or military aircraft in the current feed."
+                    } else {
+                        "Scanning…"
+                    },
                     color = TextSecondary, fontSize = 13.sp,
                     modifier = Modifier.padding(vertical = 16.dp)
                 )

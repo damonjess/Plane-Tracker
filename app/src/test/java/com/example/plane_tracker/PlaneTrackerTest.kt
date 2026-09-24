@@ -11,6 +11,8 @@ import com.example.plane_tracker.data.parseOpenSkyState
 import com.example.plane_tracker.data.parseRadarMapsJson
 import com.example.plane_tracker.data.parseMetarJson
 import com.example.plane_tracker.data.EmergencyHistoryTracker
+import com.example.plane_tracker.data.FleetState
+import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.util.ArMath
 import com.example.plane_tracker.data.EmergencyEvent
 import com.example.plane_tracker.data.OpsClassifier
@@ -525,11 +527,70 @@ class OpsClassifierTest {
     }
 
     @Test
+    fun `military call sign codes classify without owner or dbflag`() {
+        fun acWith(callsign: String, reg: String? = null) = ac().copy(callsign = callsign, registration = reg)
+
+        // Real call signs seen in the live adsb.lol feed over the UK.
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("RRR640"), null))
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("ASCOT"), null))
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("NVY806", "ZZ502"), null))
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("CFC2908", "130610"), null))
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("GAF123"), null))
+        // A code must be the whole prefix: an airline call sign that merely starts
+        // with those letters stays civil.
+        assertNull(OpsClassifier.classify(acWith("RRRAB"), "British Airways"))
+    }
+
+    @Test
+    fun `uk military tail blocks classify without owner or dbflag`() {
+        fun acWith(callsign: String, reg: String) = ac().copy(callsign = callsign, registration = reg)
+
+        // The reported case: AH-64E Apache ZM712, plus Juno ZM528, Shadow ZJ130
+        // and Voyager ZZ338 — all AAC/RAF airframes with no adsbdb owner.
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("", "ZM712"), null))
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("", "ZM528"), null))
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("", "ZJ130"), null))
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(acWith("", "ZZ338"), null))
+        // Civil tails must never be swept up by the same patterns.
+        assertNull(OpsClassifier.classify(acWith("", "G-ABCD"), "British Airways"))
+        assertNull(OpsClassifier.classify(acWith("", "N123AB"), "Delta Air Lines"))
+        assertNull(OpsClassifier.classify(acWith("", "PH-CNV"), "KLM"))
+    }
+
+    @Test
+    fun `curated military feed classifies a hex with no local flags`() {
+        assertEquals(OpsCategory.MILITARY, OpsClassifier.classify(ac(), null, knownMilitary = true))
+        assertNull(OpsClassifier.classify(ac(), "British Airways", knownMilitary = false))
+    }
+
+    @Test
     fun `dbflag bits decode military and ladd`() {
         val ac = ac(dbFlags = 0b1001)
         assertTrue(ac.isMilitary)
         assertTrue(ac.isLadd)
         assertFalse(ac(dbFlags = 0).isMilitary)
+    }
+}
+
+class FleetMergeTest {
+
+    private fun ac(hex: String, dbFlags: Int = 0, reg: String? = null) = Aircraft(
+        icao24 = hex, callsign = "", longitude = -0.5, latitude = 53.5,
+        heading = 0f, altitudeMeters = 1000.0, velocityMps = 50.0,
+        verticalRateMps = 0.0, onGround = false, registration = reg, dbFlags = dbFlags
+    )
+
+    @Test
+    fun `sparse snapshot does not erase registration or dbflags`() {
+        val engine = FlightEngine()
+        engine.mergeFleet(FleetState(listOf(ac("43c93a", dbFlags = 1, reg = "ZM712")), "adsb.lol"))
+        // OpenSky-style state vector: no registration and no dbFlags.
+        engine.mergeFleet(FleetState(listOf(ac("43c93a")), "OpenSky"))
+
+        val merged = engine.aircraftByHex("43c93a")!!
+        assertEquals(1, merged.dbFlags)
+        assertEquals("ZM712", merged.registration)
+        assertTrue(merged.isMilitary)
     }
 }
 

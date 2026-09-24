@@ -346,7 +346,7 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
         if (opsOpen) {
             OpsSheet(
                 ops = uiState.opsAircraft,
-                loading = uiState.isLoadingDetails,
+                ready = uiState.opsReady,
                 onSelect = { ac ->
                     opsOpen = false
                     viewModel.focusSearchResult(

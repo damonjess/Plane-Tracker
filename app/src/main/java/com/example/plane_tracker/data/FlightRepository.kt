@@ -39,7 +39,31 @@ class FlightRepository {
 
     /** Fetches the live fleet, trying adsb.lol first then OpenSky. */
     suspend fun fetchFleet(): FleetState = withContext(Dispatchers.IO) {
-        fetchAdsbLol() ?: fetchOpenSky() ?: FleetState(emptyList(), "offline")
+        // One immediate retry: adsb.lol occasionally drops a single request, and a
+        // single miss used to leave the UI on an empty "offline" snapshot.
+        fetchAdsbLol()
+            ?: fetchAdsbLol()
+            ?: fetchOpenSky()
+            ?: FleetState(emptyList(), "offline")
+    }
+
+    /**
+     * adsb.lol's curated military fleet (every airframe with the military flag,
+     * worldwide). Used as an independent military signal so classification does
+     * not depend on a single feed's per-aircraft flags. ~150 KB, keyless.
+     */
+    suspend fun fetchMilitaryHexes(): Set<String> = withContext(Dispatchers.IO) {
+        val body = getBody("https://api.adsb.lol/v2/mil") ?: return@withContext emptySet()
+        try {
+            val arr = JSONObject(body).optJSONArray("ac") ?: return@withContext emptySet()
+            val out = mutableSetOf<String>()
+            for (i in 0 until arr.length()) {
+                arr.getJSONObject(i).optStringOrNull("hex")?.let { out.add(it.lowercase()) }
+            }
+            out
+        } catch (_: Exception) {
+            emptySet()
+        }
     }
 
     private fun fetchAdsbLol(): FleetState? {

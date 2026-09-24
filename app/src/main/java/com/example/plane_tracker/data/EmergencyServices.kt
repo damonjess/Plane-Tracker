@@ -71,9 +71,48 @@ object OpsClassifier {
     )
 
     /**
-     * Classifies an aircraft checking callsign, registration, owner name and dbFlags.
+     * Call-sign codes broadcast **only** by military operators (RRR640 = RAF,
+     * NVY806 = Royal Navy, CFC2908 = Canadian Forces ...). Many military
+     * airframes have no owner record in adsbdb, so these classify immediately
+     * instead of waiting for a lookup that will never resolve.
      */
-    fun classify(aircraft: Aircraft, owner: String?): OpsCategory? {
+    private val militaryCallsignCodes = setOf(
+        "RRR", "ASCOT", "NVY", "CFC", "RCH", "GAF", "IAM", "FAF", "HAF",
+        "TUAF", "BAF", "NAF", "PLF", "ROF", "SVF", "AME", "DAF", "HUF", "CNV"
+    )
+
+    /** UK military tail blocks (ZM712, ZJ130, ZZ338) and Italian MM serials. */
+    private val militaryTail = Regex("Z[A-Z]\\d{3}|X[WXSZT]\\d{3}|MM\\d{4,6}", IGNORE_CASE)
+
+    /** True when [callsign] is a military call-sign code, with or without its number. */
+    private fun isMilitaryCallsign(callsign: String): Boolean {
+        val cs = callsign.trim().uppercase()
+        if (cs.isEmpty()) return false
+        return militaryCallsignCodes.any { code ->
+            cs == code ||
+                (cs.length > code.length && cs.startsWith(code) &&
+                    cs.substring(code.length).all { it.isDigit() })
+        }
+    }
+
+    /** True when [registration] is a whole military tail (never a civil G-, N-, D- reg). */
+    private fun isMilitaryTail(registration: String): Boolean {
+        val reg = registration.trim()
+        return reg.isNotEmpty() && militaryTail.matches(reg)
+    }
+
+    /**
+     * Classifies an aircraft checking callsign, registration, owner name and dbFlags.
+     *
+     * @param knownMilitary true when the hex is known military from an external
+     *   source (e.g. adsb.lol's curated /v2/mil feed), which keeps military
+     *   detection working when the fleet record itself carries no dbFlags.
+     */
+    fun classify(
+        aircraft: Aircraft,
+        owner: String?,
+        knownMilitary: Boolean = false
+    ): OpsCategory? {
         val callsign = aircraft.callsign.trim()
         val reg = aircraft.registration?.trim().orEmpty()
         val ownerClean = owner?.trim().orEmpty()
@@ -86,7 +125,9 @@ object OpsClassifier {
                 }
             }
         }
-        if (aircraft.isMilitary) {
+        if (knownMilitary || aircraft.isMilitary ||
+            isMilitaryCallsign(callsign) || isMilitaryTail(reg)
+        ) {
             return OpsCategory.MILITARY
         }
         return null

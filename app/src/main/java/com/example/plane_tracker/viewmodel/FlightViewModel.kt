@@ -77,6 +77,8 @@ data class TrackerUiState(
     val alertHistory: List<com.example.plane_tracker.data.EmergencyHistoryTracker.Entry> = emptyList(),
     /** Currently-classified blue-light / military aircraft. */
     val opsAircraft: List<Pair<Aircraft, OpsCategory>> = emptyList(),
+    /** True once a fleet snapshot has landed, so an empty ops list is meaningful. */
+    val opsReady: Boolean = false,
     /** METAR weather per airport ICAO for the map badges. */
     val airportWx: Map<String, Metar> = emptyMap(),
     /** Show tiny weather chips next to airport dots on the map. */
@@ -95,6 +97,8 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
         private const val FRAME_TICK_MS = 200L
         private const val HISTORY_KEEP_MS = 15 * 60_000L
         private const val RADAR_POLL_MS = 10 * 60_000L
+        /** adsbdb attempts per hex before we give up for this session. */
+        private const val MAX_OPS_LOOKUP_ATTEMPTS = 3
     }
 
     private val repository = FlightRepository()
@@ -127,16 +131,32 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     private val opsCategories = java.util.concurrent.ConcurrentHashMap<String, OpsCategory>()
     /** Owner names fetched from adsbdb, cached per hex. */
     private val ownerByHex = java.util.concurrent.ConcurrentHashMap<String, String>()
-    /** Hexes already attempted (including misses) to avoid repeat lookups. */
-    private val opsLookupAttempted = java.util.Collections.newSetFromMap(
-        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-    )
+    /**
+     * Owner-lookup attempts per hex. Deliberately a *capped counter* rather than a
+     * "tried once, never again" set: adsbdb failures and misses are
+     * indistinguishable from here, and one bad response used to blacklist an
+     * aircraft for the rest of the session.
+     */
+    private val opsLookupAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /**
+     * Classification inputs already evaluated per hex, so repeat recomputes of the
+     * ops list only pay for aircraft whose callsign/registration/owner/flags changed.
+     */
+    private val opsEvaluated = java.util.concurrent.ConcurrentHashMap<String, String>()
+    /**
+     * Hexes in adsb.lol's curated military fleet (refreshed every 5 min). Keeps
+     * military tagging working when the local feed record carries no dbFlags.
+     */
+    private val militaryHexes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /** Composition signature of the published ops list, to avoid needless churn. */
+    private var opsSignature = ""
 
     init {
         startPolling()
         startFrameTicker()
         startRadarPolling()
         startOpsLookupLoop()
+        startMilitaryHexLoop()
         startAirportWxLoop()
         startHistoryTrim()
     }
@@ -162,10 +182,6 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                             historyStore.insertAll(acList)
                         }
                     }
-                    // Recompute the ops aircraft list.
-                    val ops = state?.aircraft.orEmpty()
-                        .mapNotNull { ac -> opsCategoryFor(ac)?.let { ac to it } }
-                        .sortedBy { it.second.ordinal }
                     // A failed poll yields an empty "offline" snapshot: keep the
                     // last known counts/lists (engine still holds the fleet) and
                     // just flag the data source as offline.
@@ -176,7 +192,7 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                             lastUpdateMs = state.fetchedAt,
                             emergencies = emergencies.filter { it.hex !in dismissedEmergencyHexes },
                             alertHistory = emergencyHistory.all(),
-                            opsAircraft = ops
+                            opsReady = true
                         )
                     } else {
                         _uiState.value = _uiState.value.copy(
@@ -184,6 +200,9 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                             alertHistory = emergencyHistory.all()
                         )
                     }
+                    // Rebuild the ops list from the live fleet, never from the raw
+                    // snapshot, so the sheet can't disagree with the map.
+                    refreshOpsList(force = true)
                 } catch (e: Exception) {
                     _uiState.value = _uiState.value.copy(source = "offline")
                 }
@@ -234,23 +253,33 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
             while (true) {
                 val pending = engine.allAircraft(System.currentTimeMillis())
                     .map { it.icao24 }
-                    .filter { !opsLookupAttempted.contains(it) }
+                    .filter { (opsLookupAttempts[it] ?: 0) < MAX_OPS_LOOKUP_ATTEMPTS }
                     .take(20)
                 if (pending.isEmpty()) {
                     delay(5_000)
                 } else {
+                    var classifiedSomething = false
                     for (hex in pending) {
-                        opsLookupAttempted.add(hex)
+                        // Counted per attempt, not per hex: adsbdb failures are
+                        // indistinguishable from misses here, and a single bad
+                        // response used to blacklist an aircraft for the session.
+                        opsLookupAttempts[hex] = (opsLookupAttempts[hex] ?: 0) + 1
                         try {
                             val info = repository.fetchAircraftInfo(hex)
                             val owner = info?.registeredOwner
-                            if (owner != null) {
-                                ownerByHex[hex] = owner
+                            if (owner != null && ownerByHex.put(hex, owner) != owner) {
+                                classifiedSomething = true
                             }
                             val fleetAc = engine.aircraftByHex(hex)
                             if (fleetAc != null) {
-                                OpsClassifier.classify(fleetAc, owner)?.let { cat ->
-                                    opsCategories[hex] = cat
+                                OpsClassifier.classify(
+                                    fleetAc,
+                                    owner,
+                                    militaryHexes.contains(hex)
+                                )?.let { cat ->
+                                    if (opsCategories.put(hex, cat) != cat) {
+                                        classifiedSomething = true
+                                    }
                                     // Refresh the badge if this plane is currently selected.
                                     if (_uiState.value.selected?.aircraft?.icao24 == hex) {
                                         _uiState.value = _uiState.value.copy(
@@ -260,11 +289,39 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                                 }
                             }
                         } catch (_: Exception) {
-                            // Classification is best-effort.
+                            // Classification is best-effort; the attempt cap retries it.
                         }
                         delay(120) // gentle on adsbdb
                     }
+                    // Publish newly-classified aircraft straight away rather than
+                    // waiting up to a full poll interval for the sheet to catch up.
+                    if (classifiedSomething) refreshOpsList()
                 }
+            }
+        }
+    }
+
+    /**
+     * Refreshes adsb.lol's curated military hex list (~150 KB every 5 min) so
+     * military aircraft are recognised even when the fleet record for that hex
+     * carries no dbFlags — e.g. after a fall back to a source that omits them.
+     */
+    private fun startMilitaryHexLoop() {
+        viewModelScope.launch {
+            while (true) {
+                try {
+                    val hexes = repository.fetchMilitaryHexes()
+                    // Grow-only: a hex that left the list must not lose its tag and
+                    // flicker out of the ops sheet.
+                    if (hexes.isNotEmpty() && militaryHexes.addAll(hexes)) {
+                        // Every affected hex changes signature, so the next rebuild
+                        // re-classifies it as military.
+                        refreshOpsList()
+                    }
+                } catch (_: Exception) {
+                    // Best-effort: dbFlags, call signs and owner lookups still work.
+                }
+                delay(5 * 60_000L)
             }
         }
     }
@@ -325,13 +382,17 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
+        // Aircraft actively squawking an emergency stay on the map whatever the
+        // filters say: the banner and history still list them, so hiding the icon
+        // would leave the alert pointing at nothing.
         val features = engine.allAircraft(now)
             .filter { ac ->
-                val altFt = if (ac.onGround) 0 else ac.altitudeFt
-                altFt in filters.minAltitudeFt..filters.maxAltitudeFt
+                EmergencyDetector.isEmergency(ac.squawk) ||
+                    (if (ac.onGround) 0 else ac.altitudeFt) in filters.minAltitudeFt..filters.maxAltitudeFt
             }
             .filter { ac ->
-                !filters.showOnlyOps || opsCategoryFor(ac) != null
+                EmergencyDetector.isEmergency(ac.squawk) ||
+                    !filters.showOnlyOps || opsCategoryFor(ac) != null
             }
             .map { ac -> buildFeature(ac) }
 
@@ -468,9 +529,50 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = _uiState.value.copy(showAirportWx = !_uiState.value.showAirportWx)
     }
 
-    /** Live classification for the details panel badge. */
-    fun opsCategoryFor(ac: Aircraft): OpsCategory? =
-        opsCategories[ac.icao24] ?: OpsClassifier.classify(ac, ownerByHex[ac.icao24])
+    /** Live classification for the details panel badge and the ops list. */
+    fun opsCategoryFor(ac: Aircraft): OpsCategory? {
+        opsCategories[ac.icao24]?.let { return it }
+        val signature = opsInputSignature(ac)
+        // Memoised against the inputs that produced the result, so an aircraft is
+        // only re-evaluated when its call sign, tail, owner or flags change.
+        if (opsEvaluated[ac.icao24] == signature) return null
+        val category = OpsClassifier.classify(
+            ac,
+            ownerByHex[ac.icao24],
+            militaryHexes.contains(ac.icao24)
+        )
+        opsEvaluated[ac.icao24] = signature
+        if (category != null) opsCategories[ac.icao24] = category
+        return category
+    }
+
+    private fun opsInputSignature(ac: Aircraft): String = buildString {
+        append(ac.callsign.trim()).append('|')
+        append(ac.registration.orEmpty()).append('|')
+        append(ac.dbFlags).append('|')
+        append(ownerByHex[ac.icao24].orEmpty()).append('|')
+        append(militaryHexes.contains(ac.icao24))
+    }
+
+    /**
+     * Rebuilds the ops list from the **live fleet** — the same set the map draws —
+     * so the sheet, the map badges and the AR overlay can never disagree. Only
+     * emits state when the composition of the list changes unless [force] is set.
+     */
+    private fun refreshOpsList(force: Boolean = false) {
+        val list = engine.allAircraft(System.currentTimeMillis())
+            .mapNotNull { ac -> opsCategoryFor(ac)?.let { ac to it } }
+            .sortedWith(
+                compareBy(
+                    { it.second.ordinal },
+                    { it.first.callsign.ifEmpty { it.first.icao24 } }
+                )
+            )
+        val signature = list.joinToString(",") { it.first.icao24 }
+        if (!force && signature == opsSignature) return
+        opsSignature = signature
+        _uiState.value = _uiState.value.copy(opsAircraft = list)
+    }
 
     fun opsCategoryFor(hex: String): OpsCategory? {
         val ac = engine.aircraftByHex(hex) ?: return opsCategories[hex]

@@ -49,8 +49,19 @@ class FlightEngine {
         lastFleetState = state
         val now = state.fetchedAt
         state.aircraft.forEach { ac ->
-            fleet[ac.icao24] = ac
-            history[ac.icao24] = ac
+            // A sparse source must never erase detail we already hold for a hex:
+            // OpenSky state vectors carry no dbFlags/registration, so overwriting
+            // outright made military and ops aircraft lose their tag for a cycle.
+            val prev = fleet[ac.icao24]
+            val merged = if (prev == null) ac else ac.copy(
+                callsign = ac.callsign.ifEmpty { prev.callsign },
+                squawk = ac.squawk ?: prev.squawk,
+                registration = ac.registration ?: prev.registration,
+                typeCode = ac.typeCode ?: prev.typeCode,
+                dbFlags = if (ac.dbFlags != 0) ac.dbFlags else prev.dbFlags
+            )
+            fleet[ac.icao24] = merged
+            history[ac.icao24] = merged
             recordTrailPoint(ac, now)
         }
         // Expire aircraft not seen for 5 minutes.
