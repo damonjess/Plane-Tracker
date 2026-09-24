@@ -460,7 +460,68 @@ class OpsClassifierTest {
     @Test
     fun `civilian aircraft has no category`() {
         assertNull(OpsClassifier.classify(ac(), "British Airways"))
+        assertNull(OpsClassifier.classify(ac(), "Edelweiss Air"))
         assertNull(OpsClassifier.classify(ac(), null))
+    }
+
+    @Test
+    fun `air assist callsigns and registrations classify correctly`() {
+        fun acWith(callsign: String, reg: String? = null) = ac().copy(callsign = callsign, registration = reg)
+
+        // Air Ambulance / Medical
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Helimed 8", "G-NWAA"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("HLE65", "G-SCAA"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Gama", "G-SASC"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Christoph 14", "D-HZSQ"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Christoph 35", "D-HZSJ"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("ADAC", "D-BADA"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Notarzt", "D-HFJA"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Christophorus 16", "OE-XVS"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Gallus", "OE-XHY"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Rega 1", "HB-TIG"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Doc 52", "LN-OOO"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Swensk", "SE-JSK"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Avincis", "EC-LEE"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Reach 18", "N329RX"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Med-Trans Corp", "N882GT"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Air Evac EMS", "N471AE"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Survival Flight", "N390SF"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Life Flight Netwo", "N408LF"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("STAT MedEvac", "N530ME"), null))
+        assertEquals(OpsCategory.AIR_AMBULANCE, OpsClassifier.classify(acWith("Mercy Air", "N586AM"), null))
+
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("GMPSC", "G-MPSC"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("UKP442", "G-PSNO"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("GPOLA", "G-POLA"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("UKP151", "G-NPAA"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("PH-PXE", "PH-PXE"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("PolAir 1"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("GARDA1"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("Police 32", "G-NWOI"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("POLICE04", "PH-PXD"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("POLICE26", "PH-PXZ"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("DHXBB", "D-HXBB"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("Pirol Berlin", "D-HVBV"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("Polis 5420", "SE-JPR"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("Guardia Civil", "HU.26-29"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("Gendarmerie 93", "F-MJAA"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("Polizia 115", "MM81839"), null))
+        assertEquals(OpsCategory.POLICE, OpsClassifier.classify(acWith("Edelweiss 1"), null))
+
+        // Coastguard / SAR
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("Coastguard", "C-GFMX"), null))
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("Coastguard", "G-RESA"), null))
+        assertEquals(OpsCategory.COASTGUARD, OpsClassifier.classify(acWith("Kustwacht", "C-GCFK"), null))
+
+        // Lifeboat
+        assertEquals(OpsCategory.LIFEBOAT, OpsClassifier.classify(acWith("RNLI 17-42"), "Royal National Lifeboat Institution"))
+        assertEquals(OpsCategory.LIFEBOAT, OpsClassifier.classify(acWith("Reddingboot"), "KNRM"))
+        assertEquals(OpsCategory.LIFEBOAT, OpsClassifier.classify(acWith("Seenotkreuzer"), "DGzRS"))
+
+        // Fire support
+        assertEquals(OpsCategory.FIRE, OpsClassifier.classify(acWith("Cal Fire 100"), "Cal Fire"))
+        assertEquals(OpsCategory.FIRE, OpsClassifier.classify(acWith("Firehawk 1"), "LA County Fire"))
+        assertEquals(OpsCategory.FIRE, OpsClassifier.classify(acWith("Tanker 10"), "Coulson Aviation"))
     }
 
     @Test

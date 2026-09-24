@@ -43,7 +43,7 @@ class FlightRepository {
     }
 
     private fun fetchAdsbLol(): FleetState? {
-        val body = getBody("https://api.adsb.lol/v2/point/53.5/-0.5/250") ?: return null
+        val body = getBody("https://api.adsb.lol/v2/point/53.5/-0.5/350") ?: return null
         val aircraftList = JSONObject(body).optJSONArray("ac") ?: return null
         val list = mutableListOf<Aircraft>()
         for (i in 0 until aircraftList.length()) {
@@ -54,7 +54,7 @@ class FlightRepository {
 
     private fun fetchOpenSky(): FleetState? {
         val body = getBody(
-            "https://opensky-network.org/api/states/all?lamin=45.0&lomin=-5.0&lamax=60.0&lomax=5.0"
+            "https://opensky-network.org/api/states/all?lamin=45.0&lomin=-10.0&lamax=62.0&lomax=10.0"
         ) ?: return null
         val states = JSONObject(body).optJSONArray("states") ?: return null
         val list = mutableListOf<Aircraft>()
