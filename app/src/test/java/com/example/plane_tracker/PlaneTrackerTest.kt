@@ -825,4 +825,42 @@ class ViewportBoxTest {
         assertEquals(170.0, box[1], 1e-9)
         assertEquals(-170.0, box[3], 1e-9)
     }
+
+    @Test
+    fun `sub-degree camera jitter does not change the box`() {
+        // Two camera-idle events milliseconds apart differ by tiny float
+        // amounts; the quantized box must be identical or every idle event
+        // would tear down the AIS websocket.
+        val a = AisRepository.clampedViewportBox(53.40012, -0.61773, 54.20098, 0.30054)
+        val b = AisRepository.clampedViewportBox(53.40041, -0.61802, 54.20131, 0.30011)
+        assertEquals(a, b)
+    }
+
+    @Test
+    fun `half-degree midpoints quantize outward deterministically`() {
+        // 53.5 → 53..54, -0.5 → -1..0: edges always move outward, never flicker.
+        val a = AisRepository.clampedViewportBox(53.5, -0.5, 53.5, -0.5)
+        assertEquals(53.0, a[0], 1e-9)
+        assertEquals(54.0, a[2], 1e-9)
+        assertEquals(-1.0, a[1], 1e-9)
+        assertEquals(0.0, a[3], 1e-9)
+        // Idempotent: feeding the quantized box back must not move it again —
+        // this is what stops repeated camera idles from re-subscribing forever.
+        assertEquals(a, AisRepository.clampedViewportBox(a[0], a[1], a[2], a[3]))
+    }
+
+    @Test
+    fun `quantized box still covers the raw viewport`() {
+        val raws = listOf(
+            doubleArrayOf(53.4, -0.6, 54.2, 0.3),
+            doubleArrayOf(51.9, -3.1, 53.6, 2.9),
+            doubleArrayOf(48.05, -11.95, 61.95, 11.05),
+            doubleArrayOf(58.7, 4.2, 70.3, 30.8)
+        )
+        raws.forEach { raw ->
+            val box = AisRepository.clampedViewportBox(raw[0], raw[1], raw[2], raw[3])
+            assertTrue("quantized lat range must cover raw", box[0] <= raw[0] && box[2] >= raw[2])
+            assertTrue("quantized lon range must cover raw", box[1] <= raw[1] && box[3] >= raw[3])
+        }
+    }
 }

@@ -105,6 +105,12 @@ class MapManager(context: Context) {
                 map.uiSettings.isCompassEnabled = false
                 map.setStyle("https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json") { style ->
                     installLayers(style)
+                    // Flush vessel positions that streamed in while the style
+                    // was loading, so lifeboats appear on the very first fix.
+                    pendingVessels?.let { first ->
+                        pendingVessels = null
+                        applyVessels(first)
+                    }
                     map.addOnMapClickListener { point ->
                         handleTap(point)
                         true
@@ -552,16 +558,30 @@ class MapManager(context: Context) {
     /** Updates the map with marine lifeboats from AIS. */
     fun updateVessels(vessels: List<Vessel>) {
         requireMain {
-            if (!styleReady || map == null) return@requireMain
-            val features = vessels.map { v ->
-                val feature = Feature.fromGeometry(Point.fromLngLat(v.longitude, v.latitude))
-                feature.addStringProperty("mmsi", v.mmsi)
-                feature.addStringProperty("name", v.name)
-                feature.addNumberProperty("heading", v.heading)
-                feature
+            if (!styleReady || map == null) {
+                // The style (fetched over the network) isn't ready yet. Stash
+                // the snapshot so the first AIS fix isn't silently dropped on
+                // cold start — the socket keeps streaming while the style loads.
+                pendingVessels = vessels
+                return@requireMain
             }
-            vesselsSource.setGeoJson(FeatureCollection.fromFeatures(features))
+            pendingVessels = null
+            applyVessels(vessels)
         }
+    }
+
+    /** Vessel positions that arrived before the style was ready. */
+    private var pendingVessels: List<Vessel>? = null
+
+    private fun applyVessels(vessels: List<Vessel>) {
+        val features = vessels.map { v ->
+            val feature = Feature.fromGeometry(Point.fromLngLat(v.longitude, v.latitude))
+            feature.addStringProperty("mmsi", v.mmsi)
+            feature.addStringProperty("name", v.name)
+            feature.addNumberProperty("heading", v.heading)
+            feature
+        }
+        vesselsSource.setGeoJson(FeatureCollection.fromFeatures(features))
     }
 
     /** Shows the orange selection ring at a vessel's position (null hides it). */

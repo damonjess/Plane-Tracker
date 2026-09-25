@@ -60,6 +60,16 @@ class AisRepository(private val client: OkHttpClient) {
     @Volatile
     private var lastEmitMs = 0L
 
+    /**
+     * True only while a socket has completed the handshake (onOpen). A socket
+     * that is merely *assigned* to [webSocket] but still opening must not be
+     * torn down by a viewport change — it will subscribe with the current box
+     * in resubscribeMessage anyway, and closing it mid-handshake adds a dead
+     * reconnect to startup.
+     */
+    @Volatile
+    private var liveSocketOpen = false
+
     /** Breadcrumb trails for each vessel's course history. */
     private val trailRecorder = VesselTrailRecorder()
 
@@ -78,34 +88,44 @@ class AisRepository(private val client: OkHttpClient) {
 
     /**
      * Narrows the stream to the visible map area. Safe to call on every
-     * camera idle; re-subscribes only when the rounded bounds actually change.
+     * camera idle; re-subscribes only when the quantized bounds actually change.
      * Latitudes are clamped to ±90, longitudes wrapped to ±180, and the box is
      * capped at [MAX_BOX_SPAN_DEG] degrees per axis so a zoomed-out map can't
      * resubscribe us back into a worldwide firehose.
      */
     fun setViewport(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double) {
         val box = clampedViewportBox(minLat, minLon, maxLat, maxLon)
+        val socketOpen: Boolean
         synchronized(this) {
             if (box == viewportBox) return
             viewportBox = box
+            socketOpen = liveSocketOpen
         }
-        // aisstream.io doesn't support changing subscriptions on the fly.
-        // Sending a new message will cause the server to close the websocket.
-        // We must cleanly close and reconnect.
-        webSocket?.close(1000, "Viewport changed")
-        webSocket = null
-        connect()
+        if (socketOpen) {
+            // aisstream.io doesn't support changing subscriptions on the fly.
+            // Sending a new message will cause the server to close the websocket.
+            // We must cleanly close and reconnect.
+            webSocket?.close(1000, "Viewport changed")
+            webSocket = null
+            connect()
+        }
+        // No live socket: an opening handshake or a scheduled reconnect will
+        // pick the new box up in resubscribeMessage — no teardown needed.
     }
 
     /** Falls back to the home-waters default (e.g. when the camera is unknown). */
     fun clearViewport() {
+        val socketOpen: Boolean
         synchronized(this) {
             if (viewportBox == null) return
             viewportBox = null
+            socketOpen = liveSocketOpen
         }
-        webSocket?.close(1000, "Viewport cleared")
-        webSocket = null
-        connect()
+        if (socketOpen) {
+            webSocket?.close(1000, "Viewport cleared")
+            webSocket = null
+            connect()
+        }
     }
 
     /** Home waters: the audience and rescue services (RNLI, KNRM, DGzRS, SSRS,
@@ -147,12 +167,14 @@ class AisRepository(private val client: OkHttpClient) {
 
     private fun connect() {
         connectGeneration++
+        liveSocketOpen = false
         val request = Request.Builder().url(STREAM_URL).build()
         val generation = connectGeneration
         webSocket = wsClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "AIS stream connected")
                 reconnectAttempt = 0
+                liveSocketOpen = generation == connectGeneration
                 webSocket.send(resubscribeMessage().toString())
             }
 
@@ -351,10 +373,11 @@ class AisRepository(private val client: OkHttpClient) {
     /** Reconnects with exponential backoff (5s → 10s → 20s → … capped at 5 min). */
     private fun scheduleReconnect(failedGeneration: Int) {
         if (failedGeneration != connectGeneration) return // a newer socket owns the state
-        if (webSocket == null || !reconnecting.compareAndSet(false, true)) return
+        if (!reconnecting.compareAndSet(false, true)) return
         val delayMs = RECONNECT_BASE_MS * (1L shl reconnectAttempt.coerceAtMost(5))
         reconnectAttempt++
         webSocket = null
+        liveSocketOpen = false
         Log.i(TAG, "Reconnecting AIS stream in ${delayMs / 1000}s")
         mainHandler.postDelayed({
             reconnecting.set(false)
@@ -401,7 +424,14 @@ class AisRepository(private val client: OkHttpClient) {
 
         /**
          * Clamps/caps a raw camera bounds rectangle into a single AIS box:
-         * [latFrom, lonFrom, latTo, lonTo]. Pure static so it's unit-testable.
+         * [latFrom, lonFrom, latTo, lonTo], quantized outward to whole
+         * degrees so the subscription always covers the whole viewport.
+         *
+         * Quantization matters: camera-idle bounds carry sub-degree float
+         * jitter, and without it nearly every pan/zoom produced a "changed"
+         * box — a full websocket teardown + reconnect per idle event, which
+         * is what made the lifeboat layer feel like it never loaded while
+         * moving the map. Pure static so it's unit-testable.
          */
         fun clampedViewportBox(
             minLat: Double,
@@ -409,24 +439,35 @@ class AisRepository(private val client: OkHttpClient) {
             maxLat: Double,
             maxLon: Double
         ): List<Double> {
-            val latFrom = minLat.coerceIn(-90.0, 90.0)
-            val latTo = maxLat.coerceIn(latFrom, 90.0)
+            val latFrom = kotlin.math.floor(minLat.coerceIn(-90.0, 90.0))
+            val latTo = kotlin.math.ceil(maxLat.coerceIn(-90.0, 90.0)).coerceIn(latFrom, 90.0)
             // Normalize lon window to [-180, 180]; if the camera spans the
             // antimeridian (maxLon < minLon) wrap the far edge past +180.
-            val lonFrom = wrapLonStatic(minLon)
-            var lonTo = wrapLonStatic(maxLon)
+            val lonFrom = wrapLonStatic(kotlin.math.floor(wrapLonStatic(minLon)))
+            var lonTo = wrapLonStatic(kotlin.math.ceil(wrapLonStatic(maxLon)))
             if (lonTo < lonFrom) lonTo += 360.0
             val latSpan = (latTo - latFrom).coerceAtMost(MAX_BOX_SPAN_DEG)
             val lonSpan = (lonTo - lonFrom).coerceAtMost(MAX_BOX_SPAN_DEG)
             val latMid = (latFrom + latTo) / 2.0
             val lonMid = (lonFrom + lonTo) / 2.0
+            // Uncapped edges are already whole degrees (floor/ceil of the
+            // quantized bounds); capped edges may land on .5 midpoints, where
+            // the epsilon makes roundHalfDown deterministic instead of
+            // flickering either way.
             return listOf(
-                (latMid - latSpan / 2).coerceIn(-90.0, 90.0),
-                wrapLonStatic(lonMid - lonSpan / 2),
-                (latMid + latSpan / 2).coerceIn(-90.0, 90.0),
-                wrapLonStatic(lonMid + lonSpan / 2)
+                roundHalfDown(latMid - latSpan / 2).coerceIn(-90.0, 90.0),
+                wrapLonStatic(roundHalfDown(lonMid - lonSpan / 2)),
+                roundHalfDown(latMid + latSpan / 2).coerceIn(-90.0, 90.0),
+                wrapLonStatic(roundHalfDown(lonMid + lonSpan / 2))
             )
         }
+
+        /**
+         * Rounds to the nearest whole degree; exact halves go down. The tiny
+         * epsilon makes exact .5 midpoints consistently round down.
+         */
+        private fun roundHalfDown(v: Double): Double =
+            kotlin.math.floor(v + 0.5 - 1e-9)
 
         private fun wrapLonStatic(lon: Double): Double =
             ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
