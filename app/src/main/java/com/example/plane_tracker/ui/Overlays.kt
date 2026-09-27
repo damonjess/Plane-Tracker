@@ -1064,7 +1064,7 @@ fun MapControls(
 ) {
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         ControlButton("+", "Zoom in", onZoomIn)
@@ -1090,7 +1090,7 @@ private fun ControlButton(
 ) {
     Box(
         modifier = Modifier
-            .size(44.dp)
+            .size(40.dp)
             .background(
                 if (active) Accent else PanelBg,
                 RoundedCornerShape(12.dp)

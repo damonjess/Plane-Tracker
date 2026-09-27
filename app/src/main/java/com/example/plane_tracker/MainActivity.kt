@@ -227,10 +227,8 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 StatusChip(
                     count = uiState.aircraftCount,
@@ -333,8 +331,9 @@ fun TrackerScreen(viewModel: FlightViewModel = viewModel()) {
             onOpenAr = { arOpen = true },
             onOpenFilters = { filtersOpen = true },
             modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 12.dp)
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = 80.dp, end = 12.dp)
         )
 
         // Bottom: flight details (hidden when follow mode is active)
