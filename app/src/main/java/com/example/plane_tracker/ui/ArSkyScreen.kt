@@ -62,7 +62,7 @@ import com.example.plane_tracker.util.GeoMath
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-private val ArPanelBg = Color(0xE6101014)
+private val ArPanelBg = Color(0xFF101014)
 private val ArAccent = Color(0xFFF5B942)
 private val ArText = Color(0xFFE8EEF2)
 private val ArTextDim = Color(0xFF9AA7B4)

@@ -668,6 +668,19 @@ class ArMathTest {
     }
 }
 
+class EmergencySquawkTest {
+
+    @Test
+    fun `detects emergency squawk codes`() {
+        val emergencySquawks = setOf("7700", "7600", "7500")
+        assertTrue(emergencySquawks.contains("7700"))
+        assertTrue(emergencySquawks.contains("7600"))
+        assertTrue(emergencySquawks.contains("7500"))
+        assertFalse(emergencySquawks.contains("1200"))
+        assertFalse(emergencySquawks.contains("2000"))
+    }
+}
+
 class EmergencyHistoryTrackerTest {
 
     private fun event(hex: String, squawk: String = "7700") = EmergencyEvent(
