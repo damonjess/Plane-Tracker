@@ -1561,6 +1561,8 @@ fun LifeboatDetailsPanel(
     onToggleFollow: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val (flagEmoji, countryName) = vessel.countryFlagAndName
+
     AnimatedVisibility(
         visible = true,
         enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -1569,114 +1571,109 @@ fun LifeboatDetailsPanel(
     ) {
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF12161C)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF11141A)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
         ) {
             Column(
                 Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
+                    .padding(16.dp)
             ) {
-                // Title bar: flag + vessel name + close (like the reference card)
-                val (titleFlag, _) = vessel.countryFlagAndName
+                // Drag handle / grab bar
+                Box(
+                    Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .size(36.dp, 4.dp)
+                        .background(Color.White.copy(alpha = 0.2f), CircleShape)
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                // Header: Flag + Name + Actions
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF0B0F14))
-                        .padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "$titleFlag ${vessel.name.ifBlank { "UNKNOWN VESSEL" }}",
-                        color = TextPrimary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(onClick = onToggleFollow, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Filled.LocationOn,
-                            contentDescription = if (isFollowing) "Stop following" else "Follow vessel",
-                            tint = if (isFollowing) Accent else TextPrimary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "Close",
-                            tint = TextPrimary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-
-                // Photo banner (stylised sea scene — AIS has no public per-MMSI photo API)
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(120.dp)
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color(0xFF0D3B5C), Color(0xFF16648F), Color(0xFF2A8CB8))
-                            )
-                        )
-                ) {
-                    Text(
-                        "⛴️",
-                        fontSize = 60.sp,
-                        modifier = Modifier.align(Alignment.Center)
-                    )
+                    // Orange Lifeboat Badge
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.BottomCenter)
-                            .background(
-                                Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))
-                            )
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                            .size(42.dp)
+                            .background(Color(0xFFE65100).copy(alpha = 0.18f), RoundedCornerShape(10.dp))
+                            .border(1.dp, Color(0xFFE65100).copy(alpha = 0.5f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
                     ) {
+                        Text("🛥️", fontSize = 20.sp)
+                    }
+
+                    Spacer(Modifier.width(12.dp))
+
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "${vessel.shipTypeText}  ·  MMSI ${vessel.mmsi}",
+                            "$flagEmoji ${vessel.name.ifBlank { "Unknown Lifeboat" }}",
                             color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        Text(
+                            "MMSI ${vessel.mmsi}  ·  $countryName",
+                            color = Color(0xFF90A4AE),
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    IconButton(onClick = onToggleFollow, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Filled.LocationOn,
+                            contentDescription = "Follow",
+                            tint = if (isFollowing) Color(0xFFFFA726) else Color(0xFF90A4AE)
+                        )
+                    }
+                    IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color(0xFF90A4AE))
                     }
                 }
 
-                // 3-column stat strip: Speed | Course | Received
+                Spacer(Modifier.height(14.dp))
+
+                // 3-stat strip
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .background(Color(0xFF191F28), RoundedCornerShape(12.dp))
+                        .padding(vertical = 10.dp, horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    VesselStatColumn("Speed", "${vessel.speedKnots.roundToInt()} Knots", Modifier.weight(1f))
-                    VesselStatColumn(
-                        "Course",
-                        if (vessel.heading > 0.0 && vessel.heading <= 360.0) "${vessel.heading.roundToInt()}°" else "---",
-                        Modifier.weight(1f)
-                    )
-                    VesselStatColumn("Received", formatReceivedTime(vessel.lastSeen), Modifier.weight(1f))
+                    VesselStatColumn("Speed", "${vessel.speedKnots.roundToInt()} kts")
+                    VesselStatColumn("Course", if (vessel.heading in 1.0..360.0) "${vessel.heading.roundToInt()}°" else "—")
+                    VesselStatColumn("Status", vessel.navStatusText.ifBlank { "Under way" })
+                    VesselStatColumn("Updated", formatReceivedTime(vessel.lastSeen))
                 }
 
-                HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
-
-                // Voyage strip: callsign chip → position connector → destination chip
-                VoyageStrip(vessel)
-
-                HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
-
-                // Data rows (only real AIS data — no fake placeholders)
-                VesselDataGrid(vessel, metar)
-
-                Spacer(Modifier.height(12.dp))
+                // Weather & Sea conditions (compact row at bottom)
+                metar?.let { wx ->
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Wind: ${wx.windSpeedKt ?: 0} kts (${wx.windFromDeg ?: 0}°)  ·  ${wx.tempC ?: "--"}°C",
+                            color = Color(0xFFB0BEC5),
+                            fontSize = 12.sp
+                        )
+                        Text(
+                            "SAR Active",
+                            color = Color(0xFF4FC3F7),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
             }
         }
     }
@@ -1695,243 +1692,6 @@ private fun VesselStatColumn(label: String, value: String, modifier: Modifier = 
             overflow = TextOverflow.Ellipsis
         )
     }
-}
-
-/** Origin/destination-style voyage strip: callsign chip → connector → position chip. */
-@Composable
-private fun VoyageStrip(vessel: Vessel) {
-    val (flagEmoji, countryName) = vessel.countryFlagAndName
-    val leftLabel = vessel.callSign.ifBlank { vessel.mmsi }
-    val rightLabel = vessel.destination.ifBlank { countryName }.uppercase()
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                "$flagEmoji $leftLabel",
-                color = Color(0xFF4FC3F7),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                "$flagEmoji $rightLabel",
-                color = Color(0xFF4FC3F7),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        // Connector: hollow origin dot → line → solid orange position dot
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                Modifier
-                    .size(13.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF123B63))
-                    .border(2.5.dp, Color.White, CircleShape)
-            )
-            Box(
-                Modifier
-                    .weight(1f)
-                    .height(4.dp)
-                    .background(Color(0xFF14477A))
-            )
-            Box(
-                Modifier
-                    .size(15.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFF5A623))
-                    .border(2.5.dp, Color.White, CircleShape)
-            )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(vessel.lastSeen)) + " (LT)",
-                color = TextSecondary,
-                fontSize = 11.sp
-            )
-            Text(
-                formatReceivedTime(vessel.lastSeen),
-                color = TextSecondary,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-/** Label/value rows in the reference card's style, plus a compass when wind is known. */
-@Composable
-private fun VesselDataGrid(vessel: Vessel, metar: Metar?) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-        LabeledValueRow {
-            LabeledValue("Type", vessel.shipTypeText, Modifier.weight(1f))
-            if (vessel.draught > 0.0) {
-                LabeledValue("Draught", "${vessel.draught} m", Modifier.weight(1f))
-            } else {
-                Spacer(Modifier.weight(1f))
-            }
-        }
-        GridDivider()
-        // Status gets a full-width line: nav statuses like "Under way using engine"
-        // never fit a half column without truncating.
-        LabeledValueRow {
-            LabeledValue("Status", vessel.navStatusText)
-        }
-        val showSize = vessel.lengthMeters > 0 && vessel.widthMeters > 0
-        val showCallSign = vessel.callSign.isNotBlank()
-        val showImo = vessel.imoNumber > 0
-        if (showSize || showCallSign || showImo) {
-            GridDivider()
-            LabeledValueRow {
-                if (showSize) {
-                    LabeledValue("Size", "${vessel.lengthMeters} x ${vessel.widthMeters} m", Modifier.weight(1f))
-                } else {
-                    Spacer(Modifier.weight(1f))
-                }
-                if (showCallSign) {
-                    LabeledValue("Call Sign", vessel.callSign, Modifier.weight(1f))
-                } else if (showImo) {
-                    LabeledValue("IMO", "${vessel.imoNumber}", Modifier.weight(1f))
-                } else {
-                    Spacer(Modifier.weight(1f))
-                }
-            }
-            if (showSize && showCallSign && showImo) {
-                LabeledValueRow {
-                    LabeledValue("IMO", "${vessel.imoNumber}")
-                }
-            }
-        }
-
-        // Weather row: ONLY shown when a real nearest METAR is available.
-        if (metar != null) {
-            GridDivider()
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    LabeledValue("Temp", formatVesselTemp(metar))
-                    Spacer(Modifier.height(6.dp))
-                    LabeledValue("Wind", formatVesselWind(metar))
-                }
-                CompassDial(
-                    degrees = metar.windFromDeg ?: vessel.heading.roundToInt(),
-                    modifier = Modifier
-                        .padding(start = 8.dp)
-                        .size(40.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun LabeledValueRow(content: @Composable RowScope.() -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        content = content
-    )
-}
-
-@Composable
-private fun GridDivider() {
-    HorizontalDivider(color = TextSecondary.copy(alpha = 0.15f))
-}
-
-/** Inline "Label **Value**" pair, matching the reference card's row style. */
-@Composable
-private fun LabeledValue(label: String, value: String, modifier: Modifier = Modifier) {
-    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            "$label ",
-            color = TextSecondary,
-            fontSize = 13.sp,
-            maxLines = 1
-        )
-        Text(
-            value,
-            color = TextPrimary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-/** Small compass sketch: ring + needle pointing along [degrees]. */
-@Composable
-private fun CompassDial(degrees: Int, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
-        val ringColor = Color(0xFF9AA7B4)
-        val needleColor = Color(0xFFE8EEF2)
-        val tailColor = Color(0xFFF5A623)
-        val r = size.minDimension / 2f
-        val c = Offset(size.width / 2f, size.height / 2f)
-        drawCircle(color = ringColor, radius = r - 2f, center = c, style = Stroke(width = 2.dp.toPx()))
-        rotate(degrees = degrees.toFloat(), pivot = c) {
-            drawLine(
-                color = needleColor,
-                start = c,
-                end = Offset(c.x, c.y - r * 0.62f),
-                strokeWidth = 2.5.dp.toPx(),
-                cap = StrokeCap.Round
-            )
-            drawLine(
-                color = tailColor,
-                start = c,
-                end = Offset(c.x, c.y + r * 0.45f),
-                strokeWidth = 2.5.dp.toPx(),
-                cap = StrokeCap.Round
-            )
-        }
-    }
-}
-
-private fun formatVesselTemp(metar: Metar): String {
-    val c = metar.tempC ?: return "—"
-    val f = c * 9.0 / 5.0 + 32.0
-    return "%.1f°C / %.1f°F".format(Locale.US, c, f)
-}
-
-private val COMPASS_POINTS = arrayOf(
-    "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
-)
-
-private fun compassPoint(deg: Int): String = COMPASS_POINTS[((Math.floorMod(deg, 360) * 2 + 22) / 45) % 16]
-
-private fun formatVesselWind(metar: Metar): String = when {
-    metar.windSpeedKt == null || metar.windSpeedKt == 0 -> "Calm"
-    metar.windFromDeg == null -> "VRB / ${metar.windSpeedKt} knots"
-    else -> "${compassPoint(metar.windFromDeg)} / ${metar.windSpeedKt} knots"
 }
 
 private fun formatReceivedTime(lastSeenMs: Long): String {
