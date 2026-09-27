@@ -14,6 +14,7 @@ import com.example.plane_tracker.data.OpsCategory
 import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.data.FlightRepository
+import com.example.plane_tracker.data.LifeboatStore
 import com.example.plane_tracker.data.Metar
 import com.example.plane_tracker.data.SelectedFlight
 import com.example.plane_tracker.data.RouteInfo
@@ -143,8 +144,9 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
     /** Cached special-ops classification per hex (coastguard, police, military...). */
     private val opsCategories = java.util.concurrent.ConcurrentHashMap<String, OpsCategory>()
     
+    private val lifeboatStore = LifeboatStore(application)
     /** WebSocket for AIS */
-    private val aisRepo = AisRepository(OkHttpClient())
+    private val aisRepo = AisRepository(OkHttpClient(), lifeboatStore)
 
     /** Camera-follow for a lifeboat: non-null = the MMSI we're tracking. */
     private var followingVesselMmsi: String? = null

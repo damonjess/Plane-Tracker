@@ -16,6 +16,7 @@ import com.example.plane_tracker.data.FleetState
 import com.example.plane_tracker.data.FlightEngine
 import com.example.plane_tracker.util.ArMath
 import com.example.plane_tracker.data.EmergencyEvent
+import com.example.plane_tracker.data.KnownLifeboats
 import com.example.plane_tracker.data.OpsClassifier
 import com.example.plane_tracker.data.OpsCategory
 import com.example.plane_tracker.data.Vessel
@@ -791,15 +792,39 @@ class VesselTrailRecorderTest {
     }
 }
 
+class KnownLifeboatsTest {
+
+    @Test
+    fun `isKnownLifeboat identifies known MMSIs and prefixes`() {
+        assertTrue(KnownLifeboats.isKnownLifeboat("235007795"))
+        assertTrue(KnownLifeboats.isKnownLifeboat("244690768"))
+        assertTrue(KnownLifeboats.isKnownLifeboat("235001234"))
+        assertFalse(KnownLifeboats.isKnownLifeboat("123456789"))
+    }
+
+    @Test
+    fun `getKnownDetails returns vessel metadata and SAR type 51`() {
+        val rnli = KnownLifeboats.getKnownDetails("235007795")!!
+        assertEquals("RNLI LIFEBOAT 17-42", rnli.name)
+        assertEquals(51, rnli.shipType)
+
+        val prefixMatch = KnownLifeboats.getKnownDetails("235009999")!!
+        assertTrue(prefixMatch.name.contains("RNLI Lifeboat"))
+        assertEquals(51, prefixMatch.shipType)
+
+        assertNull(KnownLifeboats.getKnownDetails("999999999"))
+    }
+}
+
 class ViewportBoxTest {
 
     @Test
-    fun `ordinary box passes through unchanged`() {
+    fun `padded box expands edges outward by pad degree`() {
         val box = AisRepository.clampedViewportBox(50.0, -5.0, 58.0, 5.0)
-        assertEquals(50.0, box[0], 1e-9)
-        assertEquals(-5.0, box[1], 1e-9)
-        assertEquals(58.0, box[2], 1e-9)
-        assertEquals(5.0, box[3], 1e-9)
+        assertEquals(49.0, box[0], 1e-9)
+        assertEquals(-6.0, box[1], 1e-9)
+        assertEquals(59.0, box[2], 1e-9)
+        assertEquals(6.0, box[3], 1e-9)
     }
 
     @Test
@@ -822,8 +847,8 @@ class ViewportBoxTest {
     fun `antimeridian crossing wraps the far edge`() {
         // Camera spanning the date line: 170E to 170W
         val box = AisRepository.clampedViewportBox(50.0, 170.0, 56.0, -170.0)
-        assertEquals(170.0, box[1], 1e-9)
-        assertEquals(-170.0, box[3], 1e-9)
+        assertEquals(169.0, box[1], 1e-9)
+        assertEquals(-169.0, box[3], 1e-9)
     }
 
     @Test
@@ -838,15 +863,11 @@ class ViewportBoxTest {
 
     @Test
     fun `half-degree midpoints quantize outward deterministically`() {
-        // 53.5 → 53..54, -0.5 → -1..0: edges always move outward, never flicker.
         val a = AisRepository.clampedViewportBox(53.5, -0.5, 53.5, -0.5)
-        assertEquals(53.0, a[0], 1e-9)
-        assertEquals(54.0, a[2], 1e-9)
-        assertEquals(-1.0, a[1], 1e-9)
-        assertEquals(0.0, a[3], 1e-9)
-        // Idempotent: feeding the quantized box back must not move it again —
-        // this is what stops repeated camera idles from re-subscribing forever.
-        assertEquals(a, AisRepository.clampedViewportBox(a[0], a[1], a[2], a[3]))
+        assertEquals(52.0, a[0], 1e-9)
+        assertEquals(55.0, a[2], 1e-9)
+        assertEquals(-2.0, a[1], 1e-9)
+        assertEquals(1.0, a[3], 1e-9)
     }
 
     @Test
@@ -862,5 +883,20 @@ class ViewportBoxTest {
             assertTrue("quantized lat range must cover raw", box[0] <= raw[0] && box[2] >= raw[2])
             assertTrue("quantized lon range must cover raw", box[1] <= raw[1] && box[3] >= raw[3])
         }
+    }
+
+    @Test
+    fun `isViewportContained detects camera bounds within subscription box`() {
+        val subBox = listOf(50.0, -2.0, 56.0, 2.0)
+        // Strictly inside
+        assertTrue(AisRepository.isViewportContained(51.0, -1.0, 55.0, 1.0, subBox))
+        // Exact edges
+        assertTrue(AisRepository.isViewportContained(50.0, -2.0, 56.0, 2.0, subBox))
+        // Extends past north edge
+        assertFalse(AisRepository.isViewportContained(51.0, -1.0, 57.0, 1.0, subBox))
+        // Extends past west edge
+        assertFalse(AisRepository.isViewportContained(51.0, -3.0, 55.0, 1.0, subBox))
+        // Null box returns false
+        assertFalse(AisRepository.isViewportContained(51.0, -1.0, 55.0, 1.0, null))
     }
 }
