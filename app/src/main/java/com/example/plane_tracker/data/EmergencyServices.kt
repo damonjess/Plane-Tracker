@@ -4,7 +4,7 @@ import kotlin.text.RegexOption.IGNORE_CASE
 
 /**
  * Classifies aircraft into blue-light / special-operation categories from
- * adsbdb registered-owner names. Pure functions so they're unit-testable.
+ * adsbdb registered-owner names or broadcast identifiers. Pure functions so they're unit-testable.
  */
 enum class OpsCategory(val label: String, val emoji: String, val ringColor: String) {
     COASTGUARD("Coastguard", "🚁", "#ff9800"),
@@ -16,6 +16,40 @@ enum class OpsCategory(val label: String, val emoji: String, val ringColor: Stri
 }
 
 object OpsClassifier {
+
+    /**
+     * Curated Mode-S Hex addresses for UK, Irish and regional police fleets
+     * (NPAS, Police Scotland, PSNI, Garda ASU).
+     * Classifies immediately without waiting for an adsbdb lookup.
+     */
+    val knownPoliceHexes: Set<String> = setOf(
+        // NPAS Eurocopter EC135 / EC145 / H135
+        "4062d2", // G-POLA
+        "40499a", // G-POLB
+        "404715", // G-POLC
+        "404a2e", // G-POLD
+        "401255", // G-POLF
+        "40481e", // G-POLG
+        "404714", // G-POLH
+        "407083", // G-POLS (Police Scotland)
+        "400f28", // G-MPSA
+        "400f29", // G-MPSB
+        "400f2a", // G-MPSC
+        "400a2c", // G-SYPS
+        "406343", // G-NWOI
+        "40755d", // G-COPR
+        "406207", // G-PSNO
+        // NPAS Fixed-Wing (Vulcanair P.68R) & Contractors
+        "4078a3", // G-POLV
+        "4078a4", // G-POLW
+        "4077fb", // G-POLX
+        "4077fc", // G-POLZ
+        "400d64", // G-PCOP
+        // PSNI (Northern Ireland)
+        "400b92", // G-PSNI
+        // Garda Air Support Unit (Ireland)
+        "4ca1ee", "4ca1ef", "4ca330", "4ca258", "4ca259"
+    )
 
     /** Call-sign, registration, operator and owner patterns in priority order. */
     private val patterns: List<Pair<Regex, OpsCategory>> = listOf(
@@ -46,11 +80,11 @@ object OpsClassifier {
         ) to OpsCategory.AIR_AMBULANCE,
         Regex(
             "national police|npas|\\bpolice\\b|constabulary|police aviation|police department|metropolitan police|met police|air support unit|air support division|\\bpolice ?\\d*|" +
-                "\\bukp ?\\d*|\\bukp\\b|\\bmps\\b|\\bgarda\\d*|\\bgardai\\b|\\bgasu\\b|politie|luchtvaartpolitie|pirol|polizei|bundespolizei|\\bbpol\\b|polizeihubschrauber|" +
+                "\\bukp ?\\d*|\\bukp\\b|\\bmps\\b|\\bscout\\d*\\b|\\bsp\\d{2}\\b|\\bgarda\\d*|\\bgardai\\b|\\bgasu\\b|politie|luchtvaartpolitie|pirol|polizei|bundespolizei|\\bbpol\\b|polizeihubschrauber|" +
                 "\\bedelweiss ?\\d{1,2}\\b|libelle|hummel|passat|sperber|phönix|phoenix|flugsad|ikarus|habicht|bussard|pelikan|flugpolizei|polis|polismyndigheten|politi|politiet|poliisi|rigspolitiet|" +
                 "guardia civil|gendarmerie|police nationale|polizia|polizia di stato|carabinieri|guardia di finanza|\\bgdf\\b|policia|polícia militar|polícia civil|polícia federal|policja|" +
                 "trooper|state police|state patrol|highway patrol|sheriff'?s?|lapd|nypd|cpd|\\bdps\\b|\\bchp\\b|\\blasd\\b|\\bbso\\b|\\bpbso\\b|\\bpolair\\d*|rcmp|gendarmerie royale|ontario provincial police|\\bopp\\b|surete du quebec|\\bsq\\b|saps|" +
-                "G-?MPS[A-Z]|G-?POL[A-Z]|G-?NPA[A-Z]|G-?NWO[A-Z]|G-?SUA[A-Z]|G-?GMP[A-Z]|G-?SYP[A-Z]|G-?WMP[A-Z]|G-?TVP[A-Z]|G-?DVP[A-Z]|G-?HMP[A-Z]|G-?COP[A-Z]|G-?PSN[A-Z]|G-?VPNI|G-?RPA[A-Z]|G-?DPAS|G-?AASU|G-?PASU|G-?SPOL|" +
+                "G-?MPS[A-Z]|G-?POL[A-Z]|G-?NPA[A-Z]|G-?NWO[A-Z]|G-?SUA[A-Z]|G-?GMP[A-Z]|G-?SYP[A-Z]|G-?WMP[A-Z]|G-?TVP[A-Z]|G-?DVP[A-Z]|G-?HMP[A-Z]|G-?COP[A-Z]|G-?PCOP|G-?PSN[A-Z]|G-?VPNI|G-?RPA[A-Z]|G-?DPAS|G-?AASU|G-?PASU|G-?SPOL|" +
                 "PH-PX[A-Z]|D-HX[A-Z]{2}|D-HV[A-Z]{2}|D-HBP[A-Z]|D-HEPS|D-HPOL|D-HUTH|DHYAC|OE-BX[A-Z]|SE-JP[A-Z]|SE-HP[A-Z]|F-MJ[A-Z]{2}|LN-ORW|LN-ORX|LN-RWP|" +
                 "\\blaw enforcement\\b",
             IGNORE_CASE
@@ -71,21 +105,13 @@ object OpsClassifier {
         Regex("search and rescue|\\bsar\\b|rescue helicopter", IGNORE_CASE) to OpsCategory.COASTGUARD
     )
 
-    /**
-     * Call-sign codes broadcast **only** by military operators (RRR640 = RAF,
-     * NVY806 = Royal Navy, CFC2908 = Canadian Forces ...). Many military
-     * airframes have no owner record in adsbdb, so these classify immediately
-     * instead of waiting for a lookup that will never resolve.
-     */
     private val militaryCallsignCodes = setOf(
         "RRR", "ASCOT", "NVY", "CFC", "RCH", "GAF", "IAM", "FAF", "HAF",
         "TUAF", "BAF", "NAF", "PLF", "ROF", "SVF", "AME", "DAF", "HUF", "CNV"
     )
 
-    /** UK military tail blocks (ZM712, ZJ130, ZZ338) and Italian MM serials. */
     private val militaryTail = Regex("Z[A-Z]\\d{3}|X[WXSZT]\\d{3}|MM\\d{4,6}", IGNORE_CASE)
 
-    /** True when [callsign] is a military call-sign code, with or without its number. */
     private fun isMilitaryCallsign(callsign: String): Boolean {
         val cs = callsign.trim().uppercase()
         if (cs.isEmpty()) return false
@@ -96,24 +122,21 @@ object OpsClassifier {
         }
     }
 
-    /** True when [registration] is a whole military tail (never a civil G-, N-, D- reg). */
     private fun isMilitaryTail(registration: String): Boolean {
         val reg = registration.trim()
         return reg.isNotEmpty() && militaryTail.matches(reg)
     }
 
-    /**
-     * Classifies an aircraft checking callsign, registration, owner name and dbFlags.
-     *
-     * @param knownMilitary true when the hex is known military from an external
-     *   source (e.g. adsb.lol's curated /v2/mil feed), which keeps military
-     *   detection working when the fleet record itself carries no dbFlags.
-     */
     fun classify(
         aircraft: Aircraft,
         owner: String?,
         knownMilitary: Boolean = false
     ): OpsCategory? {
+        val hex = aircraft.icao24.trim().lowercase()
+        if (knownPoliceHexes.contains(hex)) {
+            return OpsCategory.POLICE
+        }
+
         val callsign = aircraft.callsign.trim()
         val reg = aircraft.registration?.trim().orEmpty()
         val ownerClean = owner?.trim().orEmpty()

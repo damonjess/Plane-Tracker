@@ -287,23 +287,36 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Background loop: resolves adsbdb owner names for fleet aircraft we haven't
-     * classified yet, then caches their special-ops category. Rate-limited.
+     * classified yet. Prioritises rotorcraft, turboprops and emergency call signs
+     * first so they classify in seconds rather than minutes.
      */
     private fun startOpsLookupLoop() {
         viewModelScope.launch {
+            val highPriorityTypes = setOf("EC35", "EC45", "P68", "A169", "A139", "MD52", "B06", "H135", "H145", "S92", "AW189")
+
             while (true) {
-                val pending = engine.allAircraft(System.currentTimeMillis())
+                val allPending = engine.allAircraft(System.currentTimeMillis())
+                    .filter { (opsLookupAttempts[it.icao24] ?: 0) < MAX_OPS_LOOKUP_ATTEMPTS }
+
+                // Sort high-priority candidate aircraft (helicopters / emergency prefixes) to the front
+                val pending = allPending
+                    .sortedByDescending { ac ->
+                        val isPriorityType = highPriorityTypes.contains(ac.typeCode?.uppercase())
+                        val hasOpsCallsign = ac.callsign.contains("UKP", ignoreCase = true) ||
+                            ac.callsign.contains("POL", ignoreCase = true) ||
+                            ac.callsign.contains("HELI", ignoreCase = true) ||
+                            ac.callsign.contains("HLE", ignoreCase = true) ||
+                            ac.callsign.contains("BRO", ignoreCase = true)
+                        if (isPriorityType || hasOpsCallsign) 2 else 1
+                    }
                     .map { it.icao24 }
-                    .filter { (opsLookupAttempts[it] ?: 0) < MAX_OPS_LOOKUP_ATTEMPTS }
                     .take(20)
+
                 if (pending.isEmpty()) {
                     delay(5_000)
                 } else {
                     var classifiedSomething = false
                     for (hex in pending) {
-                        // Counted per attempt, not per hex: adsbdb failures are
-                        // indistinguishable from misses here, and a single bad
-                        // response used to blacklist an aircraft for the session.
                         opsLookupAttempts[hex] = (opsLookupAttempts[hex] ?: 0) + 1
                         try {
                             val info = repository.fetchAircraftInfo(hex)
@@ -321,7 +334,6 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                                     if (opsCategories.put(hex, cat) != cat) {
                                         classifiedSomething = true
                                     }
-                                    // Refresh the badge if this plane is currently selected.
                                     if (_uiState.value.selected?.aircraft?.icao24 == hex) {
                                         _uiState.value = _uiState.value.copy(
                                             selected = _uiState.value.selected?.copy(opsCategory = cat)
@@ -330,12 +342,9 @@ class FlightViewModel(application: Application) : AndroidViewModel(application) 
                                 }
                             }
                         } catch (_: Exception) {
-                            // Classification is best-effort; the attempt cap retries it.
                         }
                         delay(120) // gentle on adsbdb
                     }
-                    // Publish newly-classified aircraft straight away rather than
-                    // waiting up to a full poll interval for the sheet to catch up.
                     if (classifiedSomething) refreshOpsList()
                 }
             }
