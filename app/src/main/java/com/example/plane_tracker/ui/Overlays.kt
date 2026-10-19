@@ -1739,6 +1739,17 @@ private fun FilterToggle(label: String, checked: Boolean, onChecked: (Boolean) -
 
 // ---------- Lifeboat details panel ----------
 
+private data class LifeboatSpecs(
+    val organization: String,
+    val fleetNo: String?,
+    val vesselClass: String,
+    val lengthM: Double,
+    val beamM: Double,
+    val draughtM: Double,
+    val maxSpeedKt: Int,
+    val propulsion: String
+)
+
 @Composable
 fun LifeboatDetailsPanel(
     vessel: Vessel,
@@ -1748,12 +1759,49 @@ fun LifeboatDetailsPanel(
     onToggleFollow: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    // Resolve country and shorten long names so they don't wrap awkwardly
     val (titleFlag, countryName) = vessel.countryFlagAndName
     val shortCountry = when (countryName.trim()) {
         "United Kingdom" -> "UK"
         "United States" -> "USA"
         else -> countryName
+    }
+
+    val knownInfo = remember(vessel.mmsi) {
+        com.example.plane_tracker.data.KnownLifeboats.getKnownDetails(vessel.mmsi)
+    }
+    val specs = remember(vessel.name, vessel.mmsi, vessel.shipType) {
+        resolveLifeboatSpecs(vessel.name, vessel.mmsi)
+    }
+    val stationInfo = remember(vessel.mmsi, vessel.latitude, vessel.longitude) {
+        resolveStationInfo(vessel.mmsi, vessel.latitude, vessel.longitude, knownInfo)
+    }
+
+    val callSign = vessel.callSign.ifBlank { knownInfo?.callSign.orEmpty() }
+    val elapsedSec = rememberElapsedSeconds(vessel.lastSeen)
+    val isUnderway = vessel.speedKnots >= 0.8 || vessel.navStatus == 0 || vessel.navStatus == 8
+
+    val lengthText = if (vessel.lengthMeters > 0 && vessel.widthMeters > 0) {
+        "${vessel.lengthMeters}m × ${vessel.widthMeters}m"
+    } else if (specs.lengthM > 0.0) {
+        "%.1fm × %.1fm".format(specs.lengthM, specs.beamM)
+    } else {
+        "—"
+    }
+
+    val draughtVal = if (vessel.draught > 0.0) vessel.draught else specs.draughtM
+    val draughtText = if (draughtVal > 0.0) "%.1f m".format(draughtVal) else "—"
+
+    val speedKmh = (vessel.speedKnots * 1.852).roundToInt()
+    val speedDisplay = if (vessel.speedKnots >= 0.5) {
+        "%.1f kt (%d km/h)".format(vessel.speedKnots, speedKmh)
+    } else {
+        "0.0 kt"
+    }
+
+    val courseDisplay = if (vessel.heading in 0.1..359.9) {
+        "${vessel.heading.roundToInt()}° ${compassCardinal(vessel.heading)}"
+    } else {
+        "—"
     }
 
     AnimatedVisibility(
@@ -1765,16 +1813,17 @@ fun LifeboatDetailsPanel(
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF11141A)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
+            colors = CardDefaults.cardColors(containerColor = PanelBg),
+            elevation = CardDefaults.cardElevation(defaultElevation = 16.dp),
+            border = BorderStroke(1.dp, Color(0xFF222C38))
         ) {
             Column(
                 Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(bottom = 16.dp)
+                    .padding(bottom = 14.dp)
             ) {
-                // Drag handle pill at the top
+                // Drag handle
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
@@ -1784,64 +1833,104 @@ fun LifeboatDetailsPanel(
                         .background(Color(0xFF333D4B), RoundedCornerShape(2.dp))
                 )
 
-                // Header row
+                // Top Header: Emblem, Vessel Name, Class & Actions
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.Top // Anchors icons and avatar at the top if title wraps
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.Top
                 ) {
-                    // Lifeboat icon container
-                    Box(
-                        modifier = Modifier
-                            .size(46.dp)
-                            .background(Color(0xFF2E1A11), RoundedCornerShape(12.dp))
-                            .border(1.dp, Color(0xFF6E391F), RoundedCornerShape(12.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("🚤", fontSize = 22.sp)
+                    // Custom RNLI-style lifeboat emblem with status dot
+                    Box(modifier = Modifier.size(48.dp)) {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val r = size.minDimension / 2f
+                            drawCircle(color = Color(0xFF152735), radius = r)
+                            drawCircle(
+                                color = Color(0xFFFF7A1A),
+                                radius = r - 1.5.dp.toPx(),
+                                style = Stroke(width = 2.dp.toPx())
+                            )
+                        }
+                        Text(
+                            text = "🛥",
+                            fontSize = 22.sp,
+                            modifier = Modifier.align(Alignment.Center)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(12.dp)
+                                .align(Alignment.BottomEnd)
+                                .background(
+                                    if (isUnderway) ChipGreen else Color(0xFF38BDF8),
+                                    CircleShape
+                                )
+                                .border(2.dp, PanelBg, CircleShape)
+                        )
                     }
 
                     Spacer(Modifier.width(12.dp))
 
-                    // Title + MMSI & Country
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(top = 2.dp)
-                    ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "$titleFlag ${vessel.name.ifBlank { "SAR LIFEBOAT ${vessel.mmsi}" }}",
+                                color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            specs.fleetNo?.let { fleet ->
+                                Surface(
+                                    color = Color(0xFF2E1A11),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(1.dp, Color(0xFFFF7A1A))
+                                ) {
+                                    Text(
+                                        text = fleet,
+                                        color = Color(0xFFFF9E5E),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(2.dp))
+
                         Text(
-                            text = "$titleFlag ${vessel.name.ifBlank { "UNKNOWN VESSEL" }}",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 2, // Allows 2 lines so full station / vessel names fit
-                            lineHeight = 20.sp,
+                            text = "${specs.organization} · ${specs.vesselClass}",
+                            color = Accent,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
 
-                        Spacer(Modifier.height(3.dp))
+                        Spacer(Modifier.height(2.dp))
 
+                        val metaParts = buildList {
+                            add("MMSI ${vessel.mmsi}")
+                            if (callSign.isNotBlank()) add("CS $callSign")
+                            if (vessel.imoNumber > 0) add("IMO ${vessel.imoNumber}")
+                            if (shortCountry.isNotBlank()) add(shortCountry)
+                        }
                         Text(
-                            text = "MMSI ${vessel.mmsi}${if (shortCountry.isNotBlank()) "  ·  $shortCountry" else ""}",
-                            color = Color(0xFF9EABB8),
-                            fontSize = 13.sp,
-                            maxLines = 1, // Keeps the MMSI & Country on one clean line
+                            text = metaParts.joinToString("  ·  "),
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    Spacer(Modifier.width(6.dp))
-
-                    // Action buttons (Pin / Follow & Close)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(top = 2.dp)
-                    ) {
-                        IconButton(
-                            onClick = onToggleFollow,
-                            modifier = Modifier.size(36.dp)
-                        ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onToggleFollow, modifier = Modifier.size(36.dp)) {
                             Icon(
                                 Icons.Filled.LocationOn,
                                 contentDescription = if (isFollowing) "Stop following" else "Follow vessel",
@@ -1849,10 +1938,7 @@ fun LifeboatDetailsPanel(
                                 modifier = Modifier.size(20.dp)
                             )
                         }
-                        IconButton(
-                            onClick = onClose,
-                            modifier = Modifier.size(36.dp)
-                        ) {
+                        IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
                             Icon(
                                 Icons.Filled.Close,
                                 contentDescription = "Close",
@@ -1863,61 +1949,33 @@ fun LifeboatDetailsPanel(
                     }
                 }
 
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(4.dp))
 
-                // Stats Card
-                Card(
+                // Station, Operational Status & Coordinates Banner
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1B222C))
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .background(Color(0xFF161B24), RoundedCornerShape(12.dp))
+                        .border(1.dp, Color(0xFF222C38), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
                 ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Speed column
-                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Speed", color = Color(0xFF8A99A8), fontSize = 11.sp)
-                            Spacer(Modifier.height(2.dp))
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                "${vessel.speedKnots.roundToInt()} kts",
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1
+                                text = "HOME STATION / SECTOR",
+                                color = Color(0xFF7E8D9D),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.8.sp
                             )
-                        }
-
-                        // Course column
-                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Course", color = Color(0xFF8A99A8), fontSize = 11.sp)
                             Spacer(Modifier.height(2.dp))
                             Text(
-                                if (vessel.heading in 1.0..360.0) "${vessel.heading.roundToInt()}°" else "—",
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1
-                            )
-                        }
-
-                        // Status column (shortened so long AIS strings don't crowd the card)
-                        Column(modifier = Modifier.weight(1.3f), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Status", color = Color(0xFF8A99A8), fontSize = 11.sp)
-                            Spacer(Modifier.height(2.dp))
-                            val shortStatus = when {
-                                vessel.navStatusText.contains("engine", ignoreCase = true) -> "Underway"
-                                vessel.navStatusText.contains("moored", ignoreCase = true) -> "Moored"
-                                vessel.navStatusText.contains("anchor", ignoreCase = true) -> "At Anchor"
-                                else -> vessel.navStatusText.ifBlank { "Active" }
-                            }
-                            Text(
-                                text = shortStatus,
+                                text = stationInfo.first,
                                 color = Color.White,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
@@ -1926,42 +1984,160 @@ fun LifeboatDetailsPanel(
                             )
                         }
 
-                        // Updated column
-                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Updated", color = Color(0xFF8A99A8), fontSize = 11.sp)
+                        Surface(
+                            color = if (isUnderway) Color(0xFF143321) else Color(0xFF132738),
+                            shape = RoundedCornerShape(20.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isUnderway) Color(0xFF4ADE80) else Color(0xFF38BDF8)
+                            )
+                        ) {
+                            Text(
+                                text = if (isUnderway) "🚨 UNDERWAY · SAR" else "⚓ ${shortNavStatus(vessel)}",
+                                color = if (isUnderway) Color(0xFF4ADE80) else Color(0xFF7DD3FC),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.End
+                        ) {
+                            Text(
+                                text = if (vessel.destination.isNotBlank()) "DESTINATION" else "STATION RANGE",
+                                color = Color(0xFF7E8D9D),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.8.sp
+                            )
                             Spacer(Modifier.height(2.dp))
                             Text(
-                                formatReceivedTime(vessel.lastSeen),
+                                text = vessel.destination.ifBlank { stationInfo.second },
                                 color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
-                }
 
-                // Weather & Sea conditions (compact row at bottom)
-                metar?.let { wx ->
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
+                    HorizontalDivider(color = Color(0xFF222C38))
+                    Spacer(Modifier.height(6.dp))
+
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp),
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "Wind: ${wx.windSpeedKt ?: 0} kts (${wx.windFromDeg ?: 0}°)  ·  ${wx.tempC ?: "--"}°C",
-                            color = Color(0xFFB0BEC5),
-                            fontSize = 12.sp
+                            text = "POS ${formatDmsCoordinates(vessel.latitude, vessel.longitude)}",
+                            color = Color(0xFF9EABB8),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
                         )
                         Text(
-                            "SAR Active",
-                            color = Color(0xFF4FC3F7),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
+                            text = "%.4f°, %.4f°".format(vessel.latitude, vessel.longitude),
+                            color = Color(0xFF7E8D9D),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                // Telemetry Grid Row 1
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TelemetryTile(
+                        label = "SPEED (SOG)",
+                        value = speedDisplay,
+                        valueColor = if (isUnderway) Color(0xFF4ADE80) else Color.White,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TelemetryTile(
+                        label = "COURSE (COG)",
+                        value = courseDisplay,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TelemetryTile(
+                        label = "MAX SPEED",
+                        value = if (specs.maxSpeedKt > 0) "${specs.maxSpeedKt} kt (${specs.propulsion})" else "SAR Class",
+                        valueColor = Accent,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // Telemetry Grid Row 2
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TelemetryTile(
+                        label = "HULL (L × B)",
+                        value = lengthText,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TelemetryTile(
+                        label = "DRAUGHT",
+                        value = draughtText,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TelemetryTile(
+                        label = "LAST REPORT",
+                        value = formatElapsedSeconds(elapsedSec, vessel.lastSeen),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // Marine Weather & Sea Conditions Strip
+                metar?.let { wx ->
+                    Spacer(Modifier.height(6.dp))
+                    val windKt = wx.windSpeedKt ?: 0
+                    val windDir = wx.windFromDeg
+                    val windCard = if (windDir != null) compassCardinal(windDir.toDouble()) else "VRB"
+                    val beaufort = beaufortDescription(windKt)
+                    val emoji = WeatherMapper.emoji(wx.condition)
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .background(Color(0xFF161B24), RoundedCornerShape(10.dp))
+                            .border(1.dp, Color(0xFF222C38), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MarineWxColumn(
+                            label = "WEATHER (${wx.icaoId})",
+                            value = "$emoji ${wx.tempC?.roundToInt() ?: "--"}°C · ${wx.condition}",
+                            modifier = Modifier.weight(1.15f)
+                        )
+                        MarineWxColumn(
+                            label = "WIND",
+                            value = if (windKt == 0) "Calm" else "$windKt kt · ${windDir ?: 0}° $windCard",
+                            modifier = Modifier.weight(1f)
+                        )
+                        MarineWxColumn(
+                            label = "SEA STATE",
+                            value = beaufort,
+                            valueColor = if (windKt >= 22) Accent else Color(0xFF7DD3FC),
+                            modifier = Modifier.weight(1.1f)
+                        )
+                        MarineWxColumn(
+                            label = "QNH / VIS",
+                            value = "${wx.altimHpa ?: "--"} hPa",
+                            modifier = Modifier.weight(0.85f)
                         )
                     }
                 }
@@ -1970,16 +2146,215 @@ fun LifeboatDetailsPanel(
     }
 }
 
-private fun formatReceivedTime(lastSeenMs: Long): String {
+@Composable
+private fun MarineWxColumn(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    valueColor: Color = Color.White
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = label,
+            color = Color(0xFF7E8D9D),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = value,
+            color = valueColor,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+private fun shortNavStatus(vessel: Vessel): String = when {
+    vessel.navStatus == 0 || vessel.speedKnots >= 0.8 -> "UNDERWAY"
+    vessel.navStatus == 1 -> "AT ANCHOR"
+    vessel.navStatus == 5 -> "MOORED"
+    vessel.navStatus == 14 -> "AIS-SART"
+    vessel.speedKnots < 0.5 -> "MOORED"
+    else -> "ACTIVE"
+}
+
+private fun compassCardinal(deg: Double): String {
+    val dirs = arrayOf(
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+        "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
+    )
+    val idx = (((deg % 360.0 + 360.0) % 360.0) / 22.5).roundToInt() % 16
+    return dirs[idx]
+}
+
+private fun formatDmsCoordinates(lat: Double, lon: Double): String {
+    fun toDms(v: Double, posHem: Char, negHem: Char): String {
+        val hem = if (v >= 0.0) posHem else negHem
+        val absV = kotlin.math.abs(v)
+        val deg = absV.toInt()
+        val minFull = (absV - deg) * 60.0
+        val min = minFull.toInt()
+        val sec = ((minFull - min) * 60.0).roundToInt().coerceIn(0, 59)
+        return "%02d°%02d'%02d\"%c".format(deg, min, sec, hem)
+    }
+    return "${toDms(lat, 'N', 'S')} ${toDms(lon, 'E', 'W')}"
+}
+
+private fun beaufortDescription(windKt: Int): String = when {
+    windKt < 1 -> "Bft 0 · Calm"
+    windKt <= 3 -> "Bft 1 · Ripples"
+    windKt <= 6 -> "Bft 2 · Smooth"
+    windKt <= 10 -> "Bft 3 · Slight"
+    windKt <= 16 -> "Bft 4 · Moderate"
+    windKt <= 21 -> "Bft 5 · Fresh"
+    windKt <= 27 -> "Bft 6 · Rough"
+    windKt <= 33 -> "Bft 7 · Near Gale"
+    windKt <= 40 -> "Bft 8 · Gale"
+    windKt <= 47 -> "Bft 9 · Severe Gale"
+    else -> "Bft 10+ · Storm"
+}
+
+private fun formatElapsedSeconds(elapsedSec: Long, lastSeenMs: Long): String {
     if (lastSeenMs <= 0L) return "Just now"
-    val diffSec = ((System.currentTimeMillis() - lastSeenMs) / 1000).coerceAtLeast(0)
     return when {
-        diffSec < 60 -> "${diffSec}s ago"
-        diffSec < 3600 -> "${diffSec / 60} min ago"
-        else -> {
-            val hours = diffSec / 3600
-            val mins = (diffSec % 3600) / 60
-            "${hours} h, ${mins} m ago"
+        elapsedSec < 60 -> "${elapsedSec}s ago"
+        elapsedSec < 3600 -> "${elapsedSec / 60}m ${elapsedSec % 60}s ago"
+        else -> "${elapsedSec / 3600}h ${(elapsedSec % 3600) / 60}m ago"
+    }
+}
+
+private fun resolveLifeboatSpecs(name: String, mmsi: String): LifeboatSpecs {
+    val upper = name.uppercase()
+    val fleetMatch = Regex("\\b(17|16|14|13|12)-(\\d{2})\\b").find(upper)
+    if (fleetMatch != null) {
+        val classPrefix = fleetMatch.groupValues[1]
+        val fleetNo = fleetMatch.value
+        return when (classPrefix) {
+            "17" -> LifeboatSpecs("RNLI", fleetNo, "Severn-class All-Weather Lifeboat", 17.0, 5.9, 2.1, 25, "Props")
+            "16" -> LifeboatSpecs("RNLI", fleetNo, "Tamar-class All-Weather Lifeboat", 16.3, 5.3, 1.5, 25, "Props")
+            "14" -> LifeboatSpecs("RNLI", fleetNo, "Trent-class All-Weather Lifeboat", 14.3, 4.9, 1.4, 25, "Props")
+            "13" -> LifeboatSpecs("RNLI", fleetNo, "Shannon-class All-Weather Lifeboat", 13.6, 4.5, 1.0, 25, "Waterjets")
+            "12" -> LifeboatSpecs("RNLI", fleetNo, "Mersey-class All-Weather Lifeboat", 11.6, 3.8, 1.1, 17, "Props")
+            else -> LifeboatSpecs("RNLI", fleetNo, "All-Weather Lifeboat", 16.0, 5.2, 1.5, 25, "Props")
         }
     }
+
+    val bClassMatch = Regex("\\bB-(\\d{3})\\b").find(upper)
+    if (bClassMatch != null || upper.contains("ATLANTIC")) {
+        return LifeboatSpecs("RNLI", bClassMatch?.value, "Atlantic 85 (B-class) Inshore", 8.4, 2.9, 0.5, 35, "Outboard")
+    }
+
+    val dClassMatch = Regex("\\bD-(\\d{3})\\b").find(upper)
+    if (dClassMatch != null) {
+        return LifeboatSpecs("RNLI", dClassMatch.value, "IB1 (D-class) Inshore Lifeboat", 5.0, 2.0, 0.4, 25, "Outboard")
+    }
+
+    return when {
+        upper.contains("KNRM") || mmsi.startsWith("244690") ->
+            LifeboatSpecs("KNRM", null, "Dutch SAR Reddingboot", 19.3, 6.5, 1.1, 34, "Waterjets")
+        upper.contains("SEENOT") || upper.contains("DGZRS") || mmsi.startsWith("211") ->
+            LifeboatSpecs("DGzRS", null, "Seenotrettungskreuzer", 23.1, 6.0, 1.6, 24, "Props")
+        upper.contains("SSRS") || upper.contains("RESCUE ") || mmsi.startsWith("265586") ->
+            LifeboatSpecs("SSRS", null, "Swedish SAR Rescue Vessel", 15.0, 4.2, 1.0, 34, "Waterjets")
+        upper.contains("RS ") || mmsi.startsWith("257") ->
+            LifeboatSpecs("Redningsselskapet", null, "Norwegian Redningsskøyte", 17.0, 4.6, 1.2, 32, "Waterjets")
+        upper.contains("SNSM") || mmsi.startsWith("227") ->
+            LifeboatSpecs("SNSM", null, "Canot Tous Temps SAR", 17.6, 4.4, 1.4, 25, "Props")
+        upper.contains("RNLI") || upper.contains("RNLB") || mmsi.startsWith("232") || mmsi.startsWith("235") ->
+            LifeboatSpecs("RNLI", null, "Search & Rescue Lifeboat", 15.0, 5.0, 1.4, 25, "SAR")
+        else ->
+            LifeboatSpecs("SAR Fleet", null, "Search & Rescue Vessel", 14.0, 4.5, 1.2, 25, "SAR")
+    }
+}
+
+private fun resolveStationInfo(
+    mmsi: String,
+    lat: Double,
+    lon: Double,
+    known: com.example.plane_tracker.data.KnownLifeboats.KnownVesselInfo?
+): Pair<String, String> {
+    val stationNames = mapOf(
+        "232001910" to "Harwich, Essex",
+        "232002440" to "Spurn Point (Humber)",
+        "232001940" to "St Peter Port, Guernsey",
+        "232001890" to "Dover, Kent",
+        "232003140" to "Margate, Kent",
+        "232003141" to "Newhaven, East Sussex",
+        "232004399" to "Aberdeen, Scotland",
+        "232004401" to "Yarmouth, Isle of Wight",
+        "232004402" to "Mallaig, Highland",
+        "232004407" to "Torbay, Devon",
+        "232004409" to "Portrush, Co. Antrim",
+        "235005118" to "Weymouth, Dorset",
+        "235005119" to "Tynemouth, North Shields",
+        "235005121" to "Plymouth, Devon",
+        "235005122" to "Penlee, Cornwall",
+        "235007809" to "Buckie, Moray",
+        "235007798" to "Tobermory, Isle of Mull",
+        "235007796" to "Holyhead, Anglesey",
+        "235007795" to "Thurso, Caithness",
+        "235010875" to "Rosslare Harbour, Wexford",
+        "235010876" to "Castletownbere, Cork",
+        "232002450" to "Aran Islands, Galway",
+        "232002460" to "Valentia, Kerry",
+        "232002470" to "Port Askaig, Islay",
+        "232002490" to "Lerwick, Shetland",
+        "232003049" to "St Mary's, Isles of Scilly",
+        "232003050" to "Barra Island, Hebrides",
+        "232003051" to "Kirkwall, Orkney",
+        "232003052" to "Aith, Shetland",
+        "232003133" to "Ballyglass, Co. Mayo",
+        "232003134" to "Stromness, Orkney",
+        "232003136" to "Stornoway, Isle of Lewis",
+        "232003139" to "Campbeltown, Kintyre",
+        "232003142" to "Arranmore, Donegal",
+        "235050722" to "Appledore, Devon",
+        "232002380" to "Port St Mary, Isle of Man",
+        "232002582" to "Donaghadee, Co. Down",
+        "232002340" to "Gorleston, Norfolk",
+        "235009123" to "Falmouth, Cornwall",
+        "235014389" to "Poole, Dorset",
+        "235014390" to "Shoreham Harbour, Sussex",
+        "235014391" to "Bridlington, East Yorks",
+        "235000120" to "Spurn Point (Humber)",
+        "235000121" to "Skegness, Lincolnshire",
+        "235000122" to "Whitby, North Yorks",
+        "235000123" to "Scarborough, North Yorks",
+        "235000124" to "Hartlepool, Co. Durham",
+        "235002150" to "Cromer, Norfolk",
+        "235002151" to "Lowestoft, Suffolk",
+        "235002152" to "Aldeburgh, Suffolk",
+        "235005880" to "Cleethorpes, Lincs",
+        "235005881" to "Hessle (Humber Rescue)",
+        "235008100" to "Hoylake, Merseyside",
+        "235008101" to "Lytham St Annes, Lancs"
+    )
+
+    val stationName = stationNames[mmsi] ?: run {
+        val nearestAp = Airports.byCode.values.minByOrNull {
+            GeoMath.distanceMeters(lat, lon, it.lat, it.lon)
+        }
+        if (nearestAp != null && GeoMath.distanceMeters(lat, lon, nearestAp.lat, nearestAp.lon) < 120_000) {
+            "${nearestAp.name} Sector"
+        } else {
+            "Coastal SAR Sector"
+        }
+    }
+
+    val rangeText = if (known != null && known.defaultLat != 0.0 && known.defaultLon != 0.0) {
+        val distM = GeoMath.distanceMeters(lat, lon, known.defaultLat, known.defaultLon)
+        val distNm = distM / 1852.0
+        if (distNm < 0.15) "On Station (0.0 nm)" else "%.1f nm (%.1f km)".format(distNm, distM / 1000.0)
+    } else {
+        "Active Coverage"
+    }
+
+    return stationName to rangeText
 }
