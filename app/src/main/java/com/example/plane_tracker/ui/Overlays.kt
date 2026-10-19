@@ -1,5 +1,6 @@
 package com.example.plane_tracker.ui
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -9,6 +10,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +25,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -1146,11 +1153,68 @@ fun FlightDetailsPanel(
     onReplay: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+
     val ac = selected.aircraft
     val info = selected.info
     val route = selected.route
 
     val isEmergencySquawk = ac.squawk in setOf("7700", "7600", "7500")
+    val elapsedSec = rememberElapsedSeconds(ac.lastSeen)
+
+    val registration = (info?.registration ?: ac.registration)?.trim().orEmpty()
+    val typeCode = (info?.typeCode ?: ac.typeCode)?.trim().orEmpty()
+    val manufacturer = info?.manufacturer?.trim().orEmpty()
+    val typeDesc = info?.typeDescription?.trim().orEmpty()
+
+    val fullModelName = buildString {
+        if (manufacturer.isNotEmpty() && !typeDesc.startsWith(manufacturer, ignoreCase = true)) {
+            append(manufacturer).append(" · ")
+        }
+        when {
+            typeDesc.isNotEmpty() -> append(typeDesc)
+            typeCode.isNotEmpty() -> append("ICAO Type $typeCode")
+            else -> append("Tracked Aircraft")
+        }
+    }
+
+    val (flagEmoji, resolvedCountry) = remember(ac.icao24, registration, info?.ownerCountry) {
+        resolveAircraftCountry(ac.icao24, registration, info?.ownerCountry)
+    }
+
+    val callsignRole = remember(ac.callsign, typeCode, selected.opsCategory) {
+        resolveCallsignRole(ac.callsign, typeCode, selected.opsCategory)
+    }
+
+    val airframeCategory = remember(typeCode, typeDesc) {
+        resolveAirframeCategory(typeCode, typeDesc)
+    }
+
+    val nearestSector = remember(ac.latitude, ac.longitude) {
+        resolveNearestAirportSector(ac.latitude, ac.longitude)
+    }
+
+    val flightLevelText = when {
+        ac.onGround || ac.altitudeFt <= 0 -> "Ground · 0 m"
+        ac.altitudeFt >= 3000 -> "FL%03d · %,d m".format((ac.altitudeFt / 100.0).roundToInt(), ac.altitudeMeters.roundToInt())
+        else -> "%,d m AGL".format(ac.altitudeMeters.roundToInt())
+    }
+
+    val vsMetersPerSec = "%.1f m/s".format(ac.verticalRateMps)
+    val vsTrend = when {
+        ac.onGround -> "On ground"
+        ac.climbFpm > 300 -> "$vsMetersPerSec · Climb"
+        ac.climbFpm < -300 -> "$vsMetersPerSec · Descent"
+        else -> "$vsMetersPerSec · Level"
+    }
+
+    val machEst = if (!ac.onGround && ac.speedKt >= 220) {
+        val localSoundKt = (661.0 - (ac.altitudeFt.coerceIn(0, 40_000) / 40_000.0) * 88.0)
+        val mach = ac.speedKt / localSoundKt
+        if (mach >= 0.35) " · M%.2f".format(mach) else ""
+    } else ""
 
     AnimatedVisibility(
         visible = true,
@@ -1159,7 +1223,9 @@ fun FlightDetailsPanel(
         modifier = modifier
     ) {
         Card(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = screenHeight * 0.80f),
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
             colors = CardDefaults.cardColors(containerColor = PanelBg),
             elevation = CardDefaults.cardElevation(defaultElevation = 16.dp),
@@ -1169,107 +1235,176 @@ fun FlightDetailsPanel(
                 Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
+                    .verticalScroll(rememberScrollState())
             ) {
                 // Drag handle
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
-                        .padding(top = 10.dp, bottom = 8.dp)
+                        .padding(top = 10.dp, bottom = 6.dp)
                         .width(36.dp)
                         .height(4.dp)
                         .background(Color(0xFF333D4B), RoundedCornerShape(2.dp))
                 )
 
-                // Compact Top Bar Header
+                // Top Header: Callsign, Badges, Full Model & Action Icons
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.Top
                 ) {
-                    // Left side: Callsign, Airline, Model & Hex
                     Column(modifier = Modifier.weight(1f)) {
-                        val flightCode = ac.callsign.ifBlank { "UNKNOWN" }
-                        val airline = route?.airlineName ?: info?.registeredOwner.orEmpty()
-                        val aircraftModel = info?.typeDescription ?: info?.typeCode ?: ac.typeCode ?: "Aircraft"
-                        val registration = info?.registration ?: ac.registration
-                        val modelAndReg = if (!registration.isNullOrBlank()) {
-                            "$aircraftModel · $registration"
-                        } else {
-                            aircraftModel
+                        val flightCode = ac.callsign.ifBlank { ac.icao24.uppercase() }
+                        val airlineOrOwner = route?.airlineName ?: info?.registeredOwner.orEmpty()
+
+                        // Line 1: Callsign + Ops/Military Badge
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "$flagEmoji $flightCode",
+                                color = Color.White,
+                                fontSize = 21.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+
+                            selected.opsCategory?.let { ops ->
+                                val opsColor = Color(android.graphics.Color.parseColor(ops.ringColor))
+                                Surface(
+                                    color = opsColor.copy(alpha = 0.18f),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(1.dp, opsColor.copy(alpha = 0.7f))
+                                ) {
+                                    Text(
+                                        text = "${ops.emoji} ${ops.label}",
+                                        color = opsColor,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            if (ac.isLadd) {
+                                Surface(
+                                    color = Color(0xFF2B2118),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(1.dp, Accent)
+                                ) {
+                                    Text(
+                                        text = "LADD",
+                                        color = Accent,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                         }
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Line 2: Operator / Airline & Mission Role
+                        val operatorSubtitle = listOfNotNull(
+                            airlineOrOwner.takeIf { it.isNotBlank() },
+                            callsignRole
+                        ).distinct().joinToString("  ·  ")
+
+                        if (operatorSubtitle.isNotBlank()) {
+                            Spacer(Modifier.height(2.dp))
                             Text(
-                                text = flightCode,
-                                color = Color.White,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.Bold
+                                text = operatorSubtitle,
+                                color = Color(0xFF9EABB8),
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
-                            if (airline.isNotBlank()) {
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = airline,
-                                    color = Color(0xFF9EABB8),
-                                    fontSize = 14.sp
-                                )
-                            }
                         }
 
                         Spacer(Modifier.height(3.dp))
 
-                        // Model, Reg & Hex all together on one horizontal line
+                        // Line 3: Full Aircraft Model (never truncated by reg/hex)
+                        Text(
+                            text = fullModelName,
+                            color = Accent,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+
+                        Spacer(Modifier.height(5.dp))
+
+                        // Line 4: Structured Pill Badges (REG, TYPE, HEX, CATEGORY) - Horizontally Scrollable & Interactive
                         Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text(
-                                text = modelAndReg,
-                                color = Color(0xFFF5B942), // Accent yellow/orange
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            Text(
-                                text = "·",
-                                color = Color(0xFF5A6978),
-                                fontSize = 13.sp
-                            )
-                            Text(
+                            if (registration.isNotEmpty()) {
+                                HeaderMetaPill(
+                                    text = "REG $registration",
+                                    bgColor = Color(0xFF2A2215),
+                                    borderColor = Color(0xFF6B5322),
+                                    textColor = Accent,
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(registration))
+                                        Toast.makeText(context, "Copied registration ($registration)", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+                            if (typeCode.isNotEmpty()) {
+                                HeaderMetaPill(
+                                    text = "ICAO $typeCode",
+                                    bgColor = Color(0xFF19202B),
+                                    borderColor = Color(0xFF2B3648),
+                                    textColor = Color(0xFFD0DCE8),
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(typeCode))
+                                        Toast.makeText(context, "Copied ICAO type ($typeCode)", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+                            HeaderMetaPill(
                                 text = "HEX ${ac.icao24.uppercase()}",
-                                color = Color(0xFF7E8D9D),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                softWrap = false
+                                bgColor = Color(0xFF19202B),
+                                borderColor = Color(0xFF2B3648),
+                                textColor = Color(0xFF9EABB8),
+                                onClick = {
+                                    val hexCode = ac.icao24.uppercase()
+                                    clipboardManager.setText(AnnotatedString(hexCode))
+                                    Toast.makeText(context, "Copied Mode-S hex ($hexCode)", Toast.LENGTH_SHORT).show()
+                                }
                             )
-                        }
-
-                        selected.opsCategory?.let { ops ->
-                            Text(
-                                text = "${ops.emoji} ${ops.label}",
-                                color = Color(android.graphics.Color.parseColor(ops.ringColor)),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
+                            if (airframeCategory.isNotEmpty()) {
+                                HeaderMetaPill(
+                                    text = airframeCategory,
+                                    bgColor = Color(0xFF142634),
+                                    borderColor = Color(0xFF23455E),
+                                    textColor = Color(0xFF7DD3FC),
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(airframeCategory))
+                                        Toast.makeText(context, "Copied category ($airframeCategory)", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
                         }
                     }
 
-                    // Right side: Action icons
+                    // Action buttons
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = onToggleFollow, modifier = Modifier.size(36.dp)) {
+                        IconButton(onClick = onToggleFollow, modifier = Modifier.size(34.dp)) {
                             Icon(
                                 Icons.Filled.LocationOn,
                                 contentDescription = "Follow",
-                                tint = if (isFollowing) Color(0xFFF5B942) else Color(0xFF9EABB8),
+                                tint = if (isFollowing) Accent else Color(0xFF9EABB8),
                                 modifier = Modifier.size(20.dp)
                             )
                         }
-                        IconButton(onClick = onReplay, modifier = Modifier.size(36.dp)) {
+                        IconButton(onClick = onReplay, modifier = Modifier.size(34.dp)) {
                             Icon(
                                 Icons.Filled.Schedule,
                                 contentDescription = "History",
@@ -1277,7 +1412,7 @@ fun FlightDetailsPanel(
                                 modifier = Modifier.size(20.dp)
                             )
                         }
-                        IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
+                        IconButton(onClick = onClose, modifier = Modifier.size(34.dp)) {
                             Icon(
                                 Icons.Filled.Close,
                                 contentDescription = "Close",
@@ -1290,12 +1425,12 @@ fun FlightDetailsPanel(
 
                 // Aircraft Photo section
                 selected.photoUrl?.let { url ->
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(6.dp))
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp)
-                            .height(160.dp)
+                            .height(148.dp)
                             .clip(RoundedCornerShape(12.dp))
                     ) {
                         AsyncImage(
@@ -1305,16 +1440,12 @@ fun FlightDetailsPanel(
                             contentScale = ContentScale.Crop
                         )
 
-                        // Floating Type/Registration badge overlaid bottom-left
-                        val photoBadgeText = buildString {
-                            val type = ac.typeCode ?: info?.typeCode
-                            val reg = info?.registration ?: ac.registration
-                            if (!type.isNullOrBlank()) append(type)
-                            if (!reg.isNullOrBlank()) {
-                                if (isNotEmpty()) append(" · ")
-                                append(reg)
-                            }
-                        }
+                        val photoBadgeText = listOfNotNull(
+                            typeCode.takeIf { it.isNotEmpty() },
+                            registration.takeIf { it.isNotEmpty() },
+                            resolvedCountry.takeIf { it.isNotEmpty() }
+                        ).joinToString(" · ")
+
                         if (photoBadgeText.isNotEmpty()) {
                             Surface(
                                 color = Color.Black.copy(alpha = 0.75f),
@@ -1333,7 +1464,6 @@ fun FlightDetailsPanel(
                             }
                         }
 
-                        // Floating photographer / photo credit overlay bottom-right
                         Surface(
                             color = Color.Black.copy(alpha = 0.75f),
                             shape = RoundedCornerShape(6.dp),
@@ -1356,138 +1486,283 @@ fun FlightDetailsPanel(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 10.dp),
-                        horizontalArrangement = Arrangement.Center
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Accent)
-                        Spacer(Modifier.width(10.dp))
-                        Text("Loading aircraft details…", color = TextSecondary, fontSize = 12.sp)
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Accent)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Loading aircraft & route details…", color = TextSecondary, fontSize = 12.sp)
                     }
                 }
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
 
-                // Route & Progress Section
+                // Route Section (if commercial route exists) OR Airspace Sector & Position Card
                 if (route != null && (route.origin != null || route.destination != null)) {
-                    RouteSection(route.origin, route.destination, routeProgress)
-                    Spacer(Modifier.height(8.dp))
+                    RouteSection(
+                        origin = route.origin,
+                        destination = route.destination,
+                        progress = routeProgress,
+                        nearestSector = nearestSector,
+                        latitude = ac.latitude,
+                        longitude = ac.longitude
+                    )
+                } else {
+                    AirspacePositionSection(
+                        nearestSector = nearestSector,
+                        latitude = ac.latitude,
+                        longitude = ac.longitude,
+                        isOnGround = ac.onGround
+                    )
                 }
 
-                // Telemetry Tiles Section
-                Column {
-                    // Emergency Squawk Alert Banner (if applicable)
-                    if (isEmergencySquawk) {
-                        val emergencyLabel = when (ac.squawk) {
-                            "7700" -> "EMERGENCY (7700)"
-                            "7600" -> "RADIO FAILURE (7600)"
-                            "7500" -> "HIJACK (7500)"
-                            else -> "SQUAWK ALERT (${ac.squawk})"
-                        }
-                        Surface(
-                            color = Color(0xFF3B1A1C),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.5.dp, Color(0xFFFF3B30)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("🚨", fontSize = 16.sp)
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = emergencyLabel,
-                                    color = Color(0xFFFF453A),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
+                Spacer(Modifier.height(4.dp))
 
-                    // Row 1
-                    Row(
+                // Emergency Squawk Alert Banner (if applicable)
+                if (isEmergencySquawk) {
+                    val emergencyLabel = when (ac.squawk) {
+                        "7700" -> "GENERAL EMERGENCY (SQUAWK 7700)"
+                        "7600" -> "RADIO COMMUNICATIONS FAILURE (SQUAWK 7600)"
+                        "7500" -> "UNLAWFUL INTERFERENCE / HIJACK (SQUAWK 7500)"
+                        else -> "SQUAWK ALERT (${ac.squawk})"
+                    }
+                    Surface(
+                        color = Color(0xFF3B1A1C),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.5.dp, Color(0xFFFF3B30)),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
                     ) {
-                        TelemetryTile(
-                            label = "ALTITUDE",
-                            value = "${if (ac.onGround) 0 else ac.altitudeFt} ft",
-                            modifier = Modifier.weight(1f)
-                        )
-                        TelemetryTile(
-                            label = "V/S",
-                            value = "${if (ac.climbFpm >= 0) "↗ +" else "↘ "}${ac.climbFpm} fpm",
-                            valueColor = if (ac.climbFpm > 100) Color(0xFF4ADE80) else if (ac.climbFpm < -100) Color(0xFFF5B942) else Color.White,
-                            modifier = Modifier.weight(1f)
-                        )
-                        TelemetryTile(
-                            label = "SPEED",
-                            value = "${ac.speedKt} kt",
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-
-                    // Row 2
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TelemetryTile(
-                            label = "TRACK",
-                            value = "${ac.heading.toInt()}°",
-                            modifier = Modifier.weight(1f)
-                        )
-                        TelemetryTile(
-                            label = "SQUAWK",
-                            value = (ac.squawk ?: "").ifBlank { "----" },
-                            isEmergency = isEmergencySquawk,
-                            modifier = Modifier.weight(1f)
-                        )
-                        val statusText = when {
-                            ac.onGround -> "On ground"
-                            ac.climbFpm > 300 -> "Climbing"
-                            ac.climbFpm < -300 -> "Descending"
-                            else -> "Cruising"
-                        }
-                        TelemetryTile(
-                            label = "STATUS",
-                            value = statusText.ifBlank { "En Route" },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-
-                    // Row 3
-                    if (info != null || ac.registration != null) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            TelemetryTile(
-                                label = "AIRCRAFT",
-                                value = info?.typeDescription ?: info?.typeCode ?: ac.typeCode ?: "—",
-                                modifier = Modifier.weight(1f)
-                            )
-                            TelemetryTile(
-                                label = "OPERATOR",
-                                value = info?.registeredOwner ?: route?.airlineName ?: "—",
-                                modifier = Modifier.weight(1f)
+                            Text("🚨", fontSize = 16.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = emergencyLabel,
+                                color = Color(0xFFFF453A),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
                 }
 
-                Spacer(Modifier.height(16.dp))
+                // Telemetry Grid Row 1: Altitude, Vertical Rate, Ground Speed
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TelemetryTile(
+                        label = "ALTITUDE (BARO)",
+                        value = if (ac.onGround) "0 ft" else "%,d ft".format(ac.altitudeFt),
+                        subValue = flightLevelText,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TelemetryTile(
+                        label = "VERTICAL RATE",
+                        value = "${if (ac.climbFpm >= 0) "↗ +" else "↘ "}${ac.climbFpm} fpm",
+                        subValue = vsTrend,
+                        valueColor = when {
+                            ac.climbFpm > 150 -> Color(0xFF4ADE80)
+                            ac.climbFpm < -150 -> Accent
+                            else -> Color.White
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    TelemetryTile(
+                        label = "GROUND SPEED",
+                        value = "${ac.speedKt} kt",
+                        subValue = "${ac.speedKmh} km/h$machEst",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // Telemetry Grid Row 2: Track/Compass, Decoded Squawk, Status/Signal
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TelemetryTile(
+                        label = "TRACK (HDG)",
+                        value = "${ac.heading.roundToInt()}° ${aircraftCompassCardinal(ac.heading.toDouble())}",
+                        subValue = "True Track",
+                        modifier = Modifier.weight(1f)
+                    )
+                    val squawkCode = (ac.squawk ?: "").ifBlank { "----" }
+                    TelemetryTile(
+                        label = "SQUAWK",
+                        value = squawkCode,
+                        subValue = decodeSquawkMeaning(ac.squawk, ac.isMilitary),
+                        isEmergency = isEmergencySquawk,
+                        modifier = Modifier.weight(1f),
+                        onClick = if (squawkCode != "----") {
+                            {
+                                clipboardManager.setText(AnnotatedString(squawkCode))
+                                Toast.makeText(context, "Copied Squawk ($squawkCode)", Toast.LENGTH_SHORT).show()
+                            }
+                        } else null
+                    )
+                    val statusText = when {
+                        ac.onGround -> "On Ground"
+                        ac.climbFpm > 300 -> "Climbing"
+                        ac.climbFpm < -300 -> "Descending"
+                        else -> "Cruising"
+                    }
+                    TelemetryTile(
+                        label = "STATUS / FEED",
+                        value = statusText,
+                        subValue = "Updated ${elapsedSec}s ago",
+                        valueColor = if (ac.onGround) Color(0xFFB0BEC5) else Color(0xFF4ADE80),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // Airframe & Operator Details Strip (2x2 Grid)
+                Spacer(Modifier.height(6.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .background(Color(0xFF161B24), RoundedCornerShape(10.dp))
+                        .border(1.dp, Color(0xFF222C38), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        AircraftSpecItem(
+                            label = "AIRFRAME & MODEL",
+                            value = fullModelName,
+                            modifier = Modifier.weight(1.15f),
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(fullModelName))
+                                Toast.makeText(context, "Copied model ($fullModelName)", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        val regTypeStr = listOfNotNull(
+                            registration.takeIf { it.isNotEmpty() }?.let { "$flagEmoji $it" },
+                            typeCode.takeIf { it.isNotEmpty() }?.let { "ICAO $it" }
+                        ).joinToString(" · ").ifEmpty { "HEX ${ac.icao24.uppercase()}" }
+                        AircraftSpecItem(
+                            label = "REGISTRATION / TYPE",
+                            value = regTypeStr,
+                            alignEnd = true,
+                            valueColor = Accent,
+                            modifier = Modifier.weight(0.85f),
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(regTypeStr))
+                                Toast.makeText(context, "Copied ($regTypeStr)", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider(color = Color(0xFF222C38))
+                    Spacer(Modifier.height(6.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        val opVal = info?.registeredOwner ?: route?.airlineName ?: "Private / Unlisted"
+                        AircraftSpecItem(
+                            label = "REGISTERED OPERATOR",
+                            value = opVal,
+                            modifier = Modifier.weight(1.1f),
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(opVal))
+                                Toast.makeText(context, "Copied operator ($opVal)", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        val countryRoleVal = listOfNotNull(
+                            resolvedCountry.takeIf { it.isNotEmpty() },
+                            callsignRole ?: selected.opsCategory?.label ?: airframeCategory.takeIf { it.isNotEmpty() }
+                        ).joinToString(" · ").ifEmpty { "Civil Aviation" }
+                        AircraftSpecItem(
+                            label = "COUNTRY / ROLE",
+                            value = countryRoleVal,
+                            alignEnd = true,
+                            valueColor = Color(0xFF7DD3FC),
+                            modifier = Modifier.weight(0.9f),
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(countryRoleVal))
+                                Toast.makeText(context, "Copied ($countryRoleVal)", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun HeaderMetaPill(
+    text: String,
+    bgColor: Color,
+    borderColor: Color,
+    textColor: Color,
+    onClick: (() -> Unit)? = null
+) {
+    Surface(
+        color = bgColor,
+        shape = RoundedCornerShape(5.dp),
+        border = BorderStroke(1.dp, borderColor),
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    ) {
+        Text(
+            text = text,
+            color = textColor,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
+}
+
+@Composable
+private fun AircraftSpecItem(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    valueColor: Color = Color.White,
+    alignEnd: Boolean = false,
+    onClick: (() -> Unit)? = null
+) {
+    Column(
+        modifier = if (onClick != null) modifier.clickable(onClick = onClick) else modifier,
+        horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start
+    ) {
+        Text(
+            text = label,
+            color = Color(0xFF7E8D9D),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = value,
+            color = valueColor,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -1505,25 +1780,28 @@ private fun TelemetryTile(
     value: String,
     modifier: Modifier = Modifier,
     valueColor: Color = Color.White,
-    isEmergency: Boolean = false
+    isEmergency: Boolean = false,
+    subValue: String? = null,
+    onClick: (() -> Unit)? = null
 ) {
     Surface(
-        modifier = modifier,
+        modifier = if (onClick != null) modifier.clickable(onClick = onClick) else modifier,
         color = if (isEmergency) Color(0xFF3B1A1C) else Color(0xFF19202B),
         shape = RoundedCornerShape(8.dp),
-        border = if (isEmergency) BorderStroke(1.5.dp, Color(0xFFFF3B30)) else null
+        border = if (isEmergency) BorderStroke(1.5.dp, Color(0xFFFF3B30)) else BorderStroke(1.dp, Color(0xFF222C38))
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = if (isEmergency) "$label · ALERT" else label,
                 color = if (isEmergency) Color(0xFFFF6B6B) else Color(0xFF7E8D9D),
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold
+                fontSize = 9.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
             )
-            Spacer(Modifier.height(3.dp))
+            Spacer(Modifier.height(2.dp))
             Text(
                 text = value,
                 color = if (isEmergency) Color(0xFFFF453A) else valueColor,
@@ -1532,6 +1810,88 @@ private fun TelemetryTile(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (!subValue.isNullOrBlank()) {
+                Spacer(Modifier.height(1.dp))
+                Text(
+                    text = subValue,
+                    color = if (isEmergency) Color(0xFFFF9E9E) else Color(0xFF8A99A8),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AirspacePositionSection(
+    nearestSector: String,
+    latitude: Double,
+    longitude: Double,
+    isOnGround: Boolean
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .background(Color(0xFF161B24), RoundedCornerShape(12.dp))
+            .border(1.dp, Color(0xFF222C38), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 9.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1.25f)) {
+                Text(
+                    text = if (isOnGround) "AIRPORT / SURFACE LOCATION" else "AIRSPACE SECTOR (NEAREST REF)",
+                    color = Color(0xFF7E8D9D),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.6.sp
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = nearestSector,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.End
+            ) {
+                Text(
+                    text = "COORDINATES",
+                    color = Color(0xFF7E8D9D),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.6.sp
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = formatAircraftDms(latitude, longitude),
+                    color = Color(0xFFD0DCE8),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
+                Text(
+                    text = "%.4f°, %.4f°".format(latitude, longitude),
+                    color = Color(0xFF7E8D9D),
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+            }
         }
     }
 }
@@ -1540,16 +1900,19 @@ private fun TelemetryTile(
 private fun RouteSection(
     origin: Airport?,
     destination: Airport?,
-    progress: RouteProgress?
+    progress: RouteProgress?,
+    nearestSector: String,
+    latitude: Double,
+    longitude: Double
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
             .background(Color(0xFF161B24), RoundedCornerShape(12.dp))
+            .border(1.dp, Color(0xFF222C38), RoundedCornerShape(12.dp))
             .padding(12.dp)
     ) {
-        // Origin -> Plane Icon -> Destination
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1557,12 +1920,23 @@ private fun RouteSection(
         ) {
             // Origin
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = origin?.iata ?: "—",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+                Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(
+                        text = origin?.iata ?: origin?.icao ?: "—",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    origin?.icao?.takeIf { it != origin.iata }?.let { icao ->
+                        Text(
+                            text = icao,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Accent,
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        )
+                    }
+                }
                 Text(
                     text = origin?.municipality ?: origin?.name ?: "Origin",
                     fontSize = 11.sp,
@@ -1572,14 +1946,26 @@ private fun RouteSection(
                 )
             }
 
-            // Plane badge
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .background(Color(0xFF2A2215), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("✈", color = Color(0xFFF5B942), fontSize = 16.sp)
+            // Plane badge + total route distance
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .background(Color(0xFF2A2215), CircleShape)
+                        .border(1.dp, Color(0xFF6B5322), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("✈", color = Accent, fontSize = 15.sp)
+                }
+                progress?.let {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "${(it.totalKm / 1.852).roundToInt()} nm",
+                        fontSize = 9.sp,
+                        color = Color(0xFF7E8D9D),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
 
             // Destination
@@ -1587,13 +1973,24 @@ private fun RouteSection(
                 modifier = Modifier.weight(1f),
                 horizontalAlignment = Alignment.End
             ) {
-                Text(
-                    text = destination?.iata ?: "—",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    textAlign = TextAlign.End
-                )
+                Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    destination?.icao?.takeIf { it != destination.iata }?.let { icao ->
+                        Text(
+                            text = icao,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Accent,
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        )
+                    }
+                    Text(
+                        text = destination?.iata ?: destination?.icao ?: "—",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        textAlign = TextAlign.End
+                    )
+                }
                 Text(
                     text = destination?.municipality ?: destination?.name ?: "Destination",
                     fontSize = 11.sp,
@@ -1605,37 +2002,218 @@ private fun RouteSection(
             }
         }
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
 
-        // Progress Bar
         LinearProgressIndicator(
             progress = { progress?.fraction ?: 0f },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(4.dp)
                 .clip(RoundedCornerShape(2.dp)),
-            color = Color(0xFFF5B942),
+            color = Accent,
             trackColor = Color(0xFF222C38),
         )
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
 
-        // Distance / ETA Strip
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            val flownStr = progress?.let { "${it.flownKm.roundToInt()} km flown" } ?: "— km flown"
-            val remainingStr = progress?.let { "${it.remainingKm.roundToInt()} km to go" } ?: "— km to go"
+            val flownStr = progress?.let {
+                "${it.flownKm.roundToInt()} km (${(it.flownKm / 1.852).roundToInt()} nm)"
+            } ?: "— km flown"
+            val remainingStr = progress?.let {
+                "${it.remainingKm.roundToInt()} km (${(it.remainingKm / 1.852).roundToInt()} nm) left"
+            } ?: "— km to go"
             val etaStr = progress?.etaMinutes?.let { mins ->
                 "${calculateClockETA(mins)} (${mins}m)"
             } ?: "ETA —"
 
-            Text(flownStr, fontSize = 11.sp, color = Color(0xFF8A99A8))
-            Text(etaStr, fontSize = 11.sp, color = Color(0xFFF5B942), fontWeight = FontWeight.SemiBold)
-            Text(remainingStr, fontSize = 11.sp, color = Color(0xFF8A99A8))
+            Text(flownStr, fontSize = 10.sp, color = Color(0xFF8A99A8))
+            Text(etaStr, fontSize = 11.sp, color = Accent, fontWeight = FontWeight.Bold)
+            Text(remainingStr, fontSize = 10.sp, color = Color(0xFF8A99A8))
+        }
+
+        Spacer(Modifier.height(6.dp))
+        HorizontalDivider(color = Color(0xFF222C38))
+        Spacer(Modifier.height(5.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "📍 $nearestSector",
+                fontSize = 10.sp,
+                color = Color(0xFF9EABB8),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "%.4f°, %.4f°".format(latitude, longitude),
+                fontSize = 10.sp,
+                color = Color(0xFF7E8D9D)
+            )
         }
     }
+}
+
+private fun aircraftCompassCardinal(deg: Double): String {
+    val dirs = arrayOf(
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+        "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
+    )
+    val idx = (((deg % 360.0 + 360.0) % 360.0) / 22.5).roundToInt() % 16
+    return dirs[idx]
+}
+
+private fun formatAircraftDms(lat: Double, lon: Double): String {
+    fun toDms(v: Double, posHem: Char, negHem: Char): String {
+        val hem = if (v >= 0.0) posHem else negHem
+        val absV = kotlin.math.abs(v)
+        val deg = absV.toInt()
+        val minFull = (absV - deg) * 60.0
+        val min = minFull.toInt()
+        val sec = ((minFull - min) * 60.0).roundToInt().coerceIn(0, 59)
+        return "%02d°%02d'%02d\"%c".format(deg, min, sec, hem)
+    }
+    return "${toDms(lat, 'N', 'S')} ${toDms(lon, 'E', 'W')}"
+}
+
+private fun resolveNearestAirportSector(lat: Double, lon: Double): String {
+    if (lat.isNaN() || lon.isNaN()) return "Unknown Airspace"
+    val nearest = Airports.byCode.values.minByOrNull {
+        GeoMath.distanceMeters(lat, lon, it.lat, it.lon)
+    } ?: return "En Route Airspace"
+
+    val distMeters = GeoMath.distanceMeters(lat, lon, nearest.lat, nearest.lon)
+    val distNm = distMeters / 1852.0
+    if (distNm < 2.0) {
+        return "At ${nearest.name} (${nearest.iata}/${nearest.icao})"
+    }
+    val dLon = Math.toRadians(lon - nearest.lon)
+    val lat1 = Math.toRadians(nearest.lat)
+    val lat2 = Math.toRadians(lat)
+    val y = kotlin.math.sin(dLon) * kotlin.math.cos(lat2)
+    val x = kotlin.math.cos(lat1) * kotlin.math.sin(lat2) -
+        kotlin.math.sin(lat1) * kotlin.math.cos(lat2) * kotlin.math.cos(dLon)
+    val bearing = (Math.toDegrees(kotlin.math.atan2(y, x)) + 360.0) % 360.0
+    val cardinal = aircraftCompassCardinal(bearing)
+    return "%.1f nm %s of %s (%s)".format(distNm, cardinal, nearest.name, nearest.iata)
+}
+
+private fun decodeSquawkMeaning(squawk: String?, isMilitary: Boolean): String {
+    val sq = squawk?.trim().orEmpty()
+    if (sq.length != 4) return "No Mode-A"
+    return when {
+        sq == "7700" -> "Emergency"
+        sq == "7600" -> "Radio Failure"
+        sq == "7500" -> "Hijack Alert"
+        sq == "7000" -> "VFR Conspicuity"
+        sq == "1200" -> "VFR (Americas)"
+        sq == "2000" -> "IFR / Oceanic"
+        sq == "1000" -> "Mode-S IFR"
+        sq == "0000" -> "Discrete / Mil"
+        sq == "7001" -> "Military Climb"
+        sq == "7004" -> "Aerobatics"
+        sq.startsWith("002") || sq.startsWith("003") -> "UK HEMS / Police"
+        sq.startsWith("60") || sq.startsWith("61") || sq.startsWith("64") ->
+            if (isMilitary) "UK Mil / NATO" else "ATC / Military"
+        else -> "ATC Assigned"
+    }
+}
+
+private fun resolveCallsignRole(callsign: String, typeCode: String, ops: OpsCategory?): String? {
+    val cs = callsign.trim().uppercase()
+    val type = typeCode.trim().uppercase()
+    return when {
+        cs.startsWith("TARTN") || cs.startsWith("TARTAN") || cs.startsWith("VOYGR") -> "Air-to-Air Refuelling"
+        cs.startsWith("ASCOT") || cs.startsWith("RRR") -> "RAF Air Mobility"
+        cs.startsWith("LION") || cs.startsWith("TYPHN") || cs.startsWith("COBRA") || cs.startsWith("VIPER") -> "Fast Jet / QRA"
+        cs.startsWith("RCH") -> "USAF Air Mobility"
+        cs.startsWith("CNV") || cs.startsWith("NVY") -> "Naval Aviation"
+        cs.startsWith("SRG") || cs.startsWith("RESCUE") || cs.startsWith("CGI") -> "Search & Rescue"
+        cs.startsWith("HLE") || cs.startsWith("HELIMED") || cs.startsWith("GAMA") -> "HEMS Air Ambulance"
+        cs.startsWith("UKP") || cs.startsWith("NPAS") || cs.startsWith("POLICE") -> "Police Air Support"
+        type == "A332" && ops == OpsCategory.MILITARY -> "MRTT Tanker / Transport"
+        type in setOf("K35R", "KC46", "A400", "C17", "C30J") -> "Military Transport / Tanker"
+        else -> null
+    }
+}
+
+private fun resolveAirframeCategory(typeCode: String, typeDesc: String): String {
+    val t = typeCode.uppercase()
+    val d = typeDesc.uppercase()
+    return when {
+        t in setOf("EC35", "EC45", "H135", "H145", "A139", "A169", "AW189", "S92", "R44", "B06", "AS50") ||
+            d.contains("HELICOPTER") || d.contains("EUROCOPTER") -> "Rotorcraft"
+        t in setOf("A388", "B744", "B748", "B77W", "B772", "B788", "B789", "B78X", "A359", "A35K", "A332", "A333", "A339", "C17", "A400") -> "Heavy"
+        t in setOf("F15", "F16", "F35", "EUFI", "TORN", "HAWK") || d.contains("TYPHOON") -> "Fast Jet"
+        t in setOf("B738", "B38M", "A320", "A321", "A20N", "A21N", "A319", "E190", "E195") -> "Narrowbody"
+        t in setOf("AT76", "DH8D", "PC12", "BE20", "P68") -> "Turboprop"
+        t in setOf("C172", "C152", "PA28", "DA40", "DA42", "SR22") -> "Light GA"
+        else -> ""
+    }
+}
+
+private fun resolveAircraftCountry(hex: String, reg: String, ownerCountry: String?): Pair<String, String> {
+    val cleanOwner = ownerCountry?.trim().orEmpty()
+    val h = hex.trim().lowercase()
+    val r = reg.trim().uppercase()
+
+    val country = when {
+        cleanOwner.isNotEmpty() -> cleanOwner
+        r.startsWith("G-") || r.matches(Regex("Z[A-Z]\\d{3}")) || h.startsWith("40") || h.startsWith("43c") -> "United Kingdom"
+        r.startsWith("EI-") || h.startsWith("4ca") -> "Ireland"
+        r.startsWith("N") && r.length >= 2 && r[1].isDigit() || h.startsWith("a") -> "United States"
+        r.startsWith("C-") || h.startsWith("c0") -> "Canada"
+        r.startsWith("D-") || h.startsWith("3c") -> "Germany"
+        r.startsWith("F-") || h.startsWith("39") -> "France"
+        r.startsWith("PH-") || h.startsWith("48") -> "Netherlands"
+        r.startsWith("OO-") || h.startsWith("44") -> "Belgium"
+        r.startsWith("EC-") || h.startsWith("34") -> "Spain"
+        r.startsWith("I-") || r.startsWith("MM") || h.startsWith("30") -> "Italy"
+        r.startsWith("HB-") || h.startsWith("4b") -> "Switzerland"
+        r.startsWith("OE-") || h.startsWith("440") -> "Austria"
+        r.startsWith("SE-") || h.startsWith("4a") -> "Sweden"
+        r.startsWith("LN-") || h.startsWith("47") -> "Norway"
+        r.startsWith("OY-") || h.startsWith("45") -> "Denmark"
+        r.startsWith("OH-") || h.startsWith("46") -> "Finland"
+        r.startsWith("SP-") || h.startsWith("48") -> "Poland"
+        else -> ""
+    }
+
+    val flag = when (country.lowercase()) {
+        "united kingdom", "uk", "great britain" -> "🇬🇧"
+        "ireland" -> "🇮🇪"
+        "united states", "usa", "us" -> "🇺🇸"
+        "canada" -> "🇨🇦"
+        "germany" -> "🇩🇪"
+        "france" -> "🇫🇷"
+        "netherlands" -> "🇳🇱"
+        "belgium" -> "🇧🇪"
+        "spain" -> "🇪🇸"
+        "italy" -> "🇮🇹"
+        "switzerland" -> "🇨🇭"
+        "austria" -> "🇦🇹"
+        "sweden" -> "🇸🇪"
+        "norway" -> "🇳🇴"
+        "denmark" -> "🇩🇰"
+        "finland" -> "🇫🇮"
+        "poland" -> "🇵🇱"
+        "portugal" -> "🇵🇹"
+        "greece" -> "🇬🇷"
+        "turkey" -> "🇹🇷"
+        "united arab emirates", "uae" -> "🇦🇪"
+        "qatar" -> "🇶🇦"
+        "australia" -> "🇦🇺"
+        else -> "✈"
+    }
+
+    return flag to country
 }
 
 // ---------- Filter bottom sheet ----------
@@ -1781,9 +2359,9 @@ fun LifeboatDetailsPanel(
     val isUnderway = vessel.speedKnots >= 0.8 || vessel.navStatus == 0 || vessel.navStatus == 8
 
     val lengthText = if (vessel.lengthMeters > 0 && vessel.widthMeters > 0) {
-        "${vessel.lengthMeters}m × ${vessel.widthMeters}m"
+        "${vessel.lengthMeters}×${vessel.widthMeters} m"
     } else if (specs.lengthM > 0.0) {
-        "%.1fm × %.1fm".format(specs.lengthM, specs.beamM)
+        "%.1f×%.1f m".format(specs.lengthM, specs.beamM)
     } else {
         "—"
     }
@@ -1833,15 +2411,15 @@ fun LifeboatDetailsPanel(
                         .background(Color(0xFF333D4B), RoundedCornerShape(2.dp))
                 )
 
-                // Top Header: Emblem, Vessel Name, Class & Actions
+                // Top Header: Emblem, Full Vessel Name, Class + Fleet Badge & Actions
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.Top
                 ) {
                     // Custom RNLI-style lifeboat emblem with status dot
-                    Box(modifier = Modifier.size(48.dp)) {
+                    Box(modifier = Modifier.size(46.dp)) {
                         Canvas(modifier = Modifier.fillMaxSize()) {
                             val r = size.minDimension / 2f
                             drawCircle(color = Color(0xFF152735), radius = r)
@@ -1853,7 +2431,7 @@ fun LifeboatDetailsPanel(
                         }
                         Text(
                             text = "🛥",
-                            fontSize = 22.sp,
+                            fontSize = 21.sp,
                             modifier = Modifier.align(Alignment.Center)
                         )
                         Box(
@@ -1871,23 +2449,26 @@ fun LifeboatDetailsPanel(
                     Spacer(Modifier.width(12.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "$titleFlag ${vessel.name.ifBlank { "SAR LIFEBOAT ${vessel.mmsi}" }}",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            lineHeight = 20.sp,
+                            overflow = TextOverflow.Ellipsis
+                        )
+
+                        Spacer(Modifier.height(4.dp))
+
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text(
-                                text = "$titleFlag ${vessel.name.ifBlank { "SAR LIFEBOAT ${vessel.mmsi}" }}",
-                                color = Color.White,
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
                             specs.fleetNo?.let { fleet ->
                                 Surface(
                                     color = Color(0xFF2E1A11),
-                                    shape = RoundedCornerShape(6.dp),
+                                    shape = RoundedCornerShape(5.dp),
                                     border = BorderStroke(1.dp, Color(0xFFFF7A1A))
                                 ) {
                                     Text(
@@ -1895,24 +2476,21 @@ fun LifeboatDetailsPanel(
                                         color = Color(0xFFFF9E5E),
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                     )
                                 }
                             }
+                            Text(
+                                text = "${specs.organization} · ${specs.vesselClass}",
+                                color = Accent,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
 
-                        Spacer(Modifier.height(2.dp))
-
-                        Text(
-                            text = "${specs.organization} · ${specs.vesselClass}",
-                            color = Accent,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-
-                        Spacer(Modifier.height(2.dp))
+                        Spacer(Modifier.height(3.dp))
 
                         val metaParts = buildList {
                             add("MMSI ${vessel.mmsi}")
@@ -1921,7 +2499,7 @@ fun LifeboatDetailsPanel(
                             if (shortCountry.isNotBlank()) add(shortCountry)
                         }
                         Text(
-                            text = metaParts.joinToString("  ·  "),
+                            text = metaParts.joinToString(" · "),
                             color = TextSecondary,
                             fontSize = 11.sp,
                             maxLines = 1,
@@ -1930,20 +2508,20 @@ fun LifeboatDetailsPanel(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = onToggleFollow, modifier = Modifier.size(36.dp)) {
+                        IconButton(onClick = onToggleFollow, modifier = Modifier.size(34.dp)) {
                             Icon(
                                 Icons.Filled.LocationOn,
                                 contentDescription = if (isFollowing) "Stop following" else "Follow vessel",
                                 tint = if (isFollowing) Accent else Color(0xFF9EABB8),
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(19.dp)
                             )
                         }
-                        IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
+                        IconButton(onClick = onClose, modifier = Modifier.size(34.dp)) {
                             Icon(
                                 Icons.Filled.Close,
                                 contentDescription = "Close",
                                 tint = Color(0xFF9EABB8),
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(19.dp)
                             )
                         }
                     }
@@ -1965,13 +2543,13 @@ fun LifeboatDetailsPanel(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1.2f)) {
                             Text(
-                                text = "HOME STATION / SECTOR",
+                                text = "HOME STATION",
                                 color = Color(0xFF7E8D9D),
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                letterSpacing = 0.8.sp
+                                letterSpacing = 0.6.sp
                             )
                             Spacer(Modifier.height(2.dp))
                             Text(
@@ -1984,22 +2562,7 @@ fun LifeboatDetailsPanel(
                             )
                         }
 
-                        Surface(
-                            color = if (isUnderway) Color(0xFF143321) else Color(0xFF132738),
-                            shape = RoundedCornerShape(20.dp),
-                            border = BorderStroke(
-                                1.dp,
-                                if (isUnderway) Color(0xFF4ADE80) else Color(0xFF38BDF8)
-                            )
-                        ) {
-                            Text(
-                                text = if (isUnderway) "🚨 UNDERWAY · SAR" else "⚓ ${shortNavStatus(vessel)}",
-                                color = if (isUnderway) Color(0xFF4ADE80) else Color(0xFF7DD3FC),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
-                        }
+                        Spacer(Modifier.width(8.dp))
 
                         Column(
                             modifier = Modifier.weight(1f),
@@ -2010,7 +2573,7 @@ fun LifeboatDetailsPanel(
                                 color = Color(0xFF7E8D9D),
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                letterSpacing = 0.8.sp
+                                letterSpacing = 0.6.sp
                             )
                             Spacer(Modifier.height(2.dp))
                             Text(
@@ -2026,23 +2589,41 @@ fun LifeboatDetailsPanel(
 
                     Spacer(Modifier.height(8.dp))
                     HorizontalDivider(color = Color(0xFF222C38))
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(8.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Surface(
+                            color = if (isUnderway) Color(0xFF143321) else Color(0xFF132738),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isUnderway) Color(0xFF4ADE80) else Color(0xFF38BDF8)
+                            )
+                        ) {
+                            Text(
+                                text = if (isUnderway) "🚨 UNDERWAY · SAR" else "⚓ ${shortNavStatus(vessel)}",
+                                color = if (isUnderway) Color(0xFF4ADE80) else Color(0xFF7DD3FC),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+
                         Text(
-                            text = "POS ${formatDmsCoordinates(vessel.latitude, vessel.longitude)}",
+                            text = "${formatDmsCoordinates(vessel.latitude, vessel.longitude)}  (${
+                                "%.4f°, %.4f°".format(
+                                    vessel.latitude,
+                                    vessel.longitude
+                                )
+                            })",
                             color = Color(0xFF9EABB8),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = "%.4f°, %.4f°".format(vessel.latitude, vessel.longitude),
-                            color = Color(0xFF7E8D9D),
-                            fontSize = 11.sp
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
                         )
                     }
                 }
@@ -2099,7 +2680,7 @@ fun LifeboatDetailsPanel(
                     )
                 }
 
-                // Marine Weather & Sea Conditions Strip
+                // Marine Weather & Sea Conditions (2x2 Grid so no text truncates)
                 metar?.let { wx ->
                     Spacer(Modifier.height(6.dp))
                     val windKt = wx.windSpeedKt ?: 0
@@ -2107,38 +2688,56 @@ fun LifeboatDetailsPanel(
                     val windCard = if (windDir != null) compassCardinal(windDir.toDouble()) else "VRB"
                     val beaufort = beaufortDescription(windKt)
                     val emoji = WeatherMapper.emoji(wx.condition)
+                    val visText = wx.visibility?.let { v -> if (v == "6+") "10km+" else "${v}sm" } ?: ""
 
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp)
                             .background(Color(0xFF161B24), RoundedCornerShape(10.dp))
                             .border(1.dp, Color(0xFF222C38), RoundedCornerShape(10.dp))
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
-                        MarineWxColumn(
-                            label = "WEATHER (${wx.icaoId})",
-                            value = "$emoji ${wx.tempC?.roundToInt() ?: "--"}°C · ${wx.condition}",
-                            modifier = Modifier.weight(1.15f)
-                        )
-                        MarineWxColumn(
-                            label = "WIND",
-                            value = if (windKt == 0) "Calm" else "$windKt kt · ${windDir ?: 0}° $windCard",
-                            modifier = Modifier.weight(1f)
-                        )
-                        MarineWxColumn(
-                            label = "SEA STATE",
-                            value = beaufort,
-                            valueColor = if (windKt >= 22) Accent else Color(0xFF7DD3FC),
-                            modifier = Modifier.weight(1.1f)
-                        )
-                        MarineWxColumn(
-                            label = "QNH / VIS",
-                            value = "${wx.altimHpa ?: "--"} hPa",
-                            modifier = Modifier.weight(0.85f)
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            MarineWxItem(
+                                label = "WEATHER (${wx.icaoId})",
+                                value = "$emoji ${wx.tempC?.roundToInt() ?: "--"}°C · ${wx.condition}",
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            MarineWxItem(
+                                label = "WIND",
+                                value = if (windKt == 0) "Calm (0 kt)" else "$windKt kt · ${windDir ?: 0}° ($windCard)",
+                                alignEnd = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        Spacer(Modifier.height(6.dp))
+                        HorizontalDivider(color = Color(0xFF222C38))
+                        Spacer(Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            MarineWxItem(
+                                label = "SEA STATE",
+                                value = beaufort,
+                                valueColor = if (windKt >= 22) Accent else Color(0xFF7DD3FC),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            MarineWxItem(
+                                label = "PRESSURE / VIS",
+                                value = "${wx.altimHpa ?: "--"} hPa" + if (visText.isNotEmpty()) " · Vis $visText" else "",
+                                alignEnd = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
                 }
             }
@@ -2147,15 +2746,16 @@ fun LifeboatDetailsPanel(
 }
 
 @Composable
-private fun MarineWxColumn(
+private fun MarineWxItem(
     label: String,
     value: String,
     modifier: Modifier = Modifier,
-    valueColor: Color = Color.White
+    valueColor: Color = Color.White,
+    alignEnd: Boolean = false
 ) {
     Column(
         modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally
+        horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start
     ) {
         Text(
             text = label,
@@ -2168,7 +2768,7 @@ private fun MarineWxColumn(
         Text(
             text = value,
             color = valueColor,
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -2208,17 +2808,17 @@ private fun formatDmsCoordinates(lat: Double, lon: Double): String {
 }
 
 private fun beaufortDescription(windKt: Int): String = when {
-    windKt < 1 -> "Bft 0 · Calm"
-    windKt <= 3 -> "Bft 1 · Ripples"
-    windKt <= 6 -> "Bft 2 · Smooth"
-    windKt <= 10 -> "Bft 3 · Slight"
-    windKt <= 16 -> "Bft 4 · Moderate"
-    windKt <= 21 -> "Bft 5 · Fresh"
-    windKt <= 27 -> "Bft 6 · Rough"
-    windKt <= 33 -> "Bft 7 · Near Gale"
-    windKt <= 40 -> "Bft 8 · Gale"
-    windKt <= 47 -> "Bft 9 · Severe Gale"
-    else -> "Bft 10+ · Storm"
+    windKt < 1 -> "Bft 0 · Calm (Glassy)"
+    windKt <= 3 -> "Bft 1 · Light Air (Ripples)"
+    windKt <= 6 -> "Bft 2 · Light Breeze (Smooth)"
+    windKt <= 10 -> "Bft 3 · Gentle Breeze (Slight)"
+    windKt <= 16 -> "Bft 4 · Moderate (1–1.5m)"
+    windKt <= 21 -> "Bft 5 · Fresh Breeze (2m)"
+    windKt <= 27 -> "Bft 6 · Strong Breeze (3m)"
+    windKt <= 33 -> "Bft 7 · Near Gale (4m)"
+    windKt <= 40 -> "Bft 8 · Gale (5.5m)"
+    windKt <= 47 -> "Bft 9 · Severe Gale (7m)"
+    else -> "Bft 10+ · Storm (9m+)"
 }
 
 private fun formatElapsedSeconds(elapsedSec: Long, lastSeenMs: Long): String {
@@ -2237,11 +2837,11 @@ private fun resolveLifeboatSpecs(name: String, mmsi: String): LifeboatSpecs {
         val classPrefix = fleetMatch.groupValues[1]
         val fleetNo = fleetMatch.value
         return when (classPrefix) {
-            "17" -> LifeboatSpecs("RNLI", fleetNo, "Severn-class All-Weather Lifeboat", 17.0, 5.9, 2.1, 25, "Props")
-            "16" -> LifeboatSpecs("RNLI", fleetNo, "Tamar-class All-Weather Lifeboat", 16.3, 5.3, 1.5, 25, "Props")
-            "14" -> LifeboatSpecs("RNLI", fleetNo, "Trent-class All-Weather Lifeboat", 14.3, 4.9, 1.4, 25, "Props")
-            "13" -> LifeboatSpecs("RNLI", fleetNo, "Shannon-class All-Weather Lifeboat", 13.6, 4.5, 1.0, 25, "Waterjets")
-            "12" -> LifeboatSpecs("RNLI", fleetNo, "Mersey-class All-Weather Lifeboat", 11.6, 3.8, 1.1, 17, "Props")
+            "17" -> LifeboatSpecs("RNLI", fleetNo, "Severn-class All-Weather", 17.0, 5.9, 2.1, 25, "Props")
+            "16" -> LifeboatSpecs("RNLI", fleetNo, "Tamar-class All-Weather", 16.3, 5.3, 1.5, 25, "Props")
+            "14" -> LifeboatSpecs("RNLI", fleetNo, "Trent-class All-Weather", 14.3, 4.9, 1.4, 25, "Props")
+            "13" -> LifeboatSpecs("RNLI", fleetNo, "Shannon-class All-Weather", 13.6, 4.5, 1.0, 25, "Waterjets")
+            "12" -> LifeboatSpecs("RNLI", fleetNo, "Mersey-class All-Weather", 11.6, 3.8, 1.1, 17, "Props")
             else -> LifeboatSpecs("RNLI", fleetNo, "All-Weather Lifeboat", 16.0, 5.2, 1.5, 25, "Props")
         }
     }
@@ -2253,7 +2853,7 @@ private fun resolveLifeboatSpecs(name: String, mmsi: String): LifeboatSpecs {
 
     val dClassMatch = Regex("\\bD-(\\d{3})\\b").find(upper)
     if (dClassMatch != null) {
-        return LifeboatSpecs("RNLI", dClassMatch.value, "IB1 (D-class) Inshore Lifeboat", 5.0, 2.0, 0.4, 25, "Outboard")
+        return LifeboatSpecs("RNLI", dClassMatch.value, "IB1 (D-class) Inshore", 5.0, 2.0, 0.4, 25, "Outboard")
     }
 
     return when {
@@ -2298,6 +2898,7 @@ private fun resolveStationInfo(
         "235005122" to "Penlee, Cornwall",
         "235007809" to "Buckie, Moray",
         "235007798" to "Tobermory, Isle of Mull",
+        "235007797" to "Lochinver, Sutherland",
         "235007796" to "Holyhead, Anglesey",
         "235007795" to "Thurso, Caithness",
         "235010875" to "Rosslare Harbour, Wexford",
