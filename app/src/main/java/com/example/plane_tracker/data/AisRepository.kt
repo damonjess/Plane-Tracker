@@ -1,6 +1,5 @@
 package com.example.plane_tracker.data
 
-import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -12,10 +11,11 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
-import okio.ByteString
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
@@ -24,70 +24,42 @@ import kotlin.math.floor
 /**
  * Streams live AIS vessel positions from aisstream.io and publishes the
  * lifeboat subset.
- *
- * Performance notes (this stream can be very chatty — thousands of messages
- * per minute across the bounding boxes):
- *  - UI emissions are throttled to at most one list update per [EMIT_INTERVAL_MS],
- *    so a burst of position reports can't flood recomposition.
- *  - Lifeboat classification happens instantly for known MMSIs or persisted
- *    vessels, without waiting ~6 minutes for AIS static data broadcasts.
- *  - The (expensive) lifeboat name regex only re-runs when a vessel's name or
- *    ship type actually changes; the verdict is cached on the vessel.
- *  - The stale-vessel cleanup sweep runs on the same throttle as emissions,
- *    never per message.
- *  - The socket self-heals: keepalive pings detect a silently-dead connection
- *    and failures/closes reconnect with exponential backoff.
  */
 class AisRepository(
     private val client: OkHttpClient,
     private val lifeboatStore: LifeboatStore? = null
 ) {
-    /**
-     * Client dedicated to the stream with protocol-level pings enabled: pings
-     * keep NAT timeouts at bay and fail the socket if a pong never comes back,
-     * which surfaces as [onFailure] and a clean reconnect.
-     */
     private val wsClient = client.newBuilder()
         .pingInterval(PING_INTERVAL_S, TimeUnit.SECONDS)
         .build()
 
+    private val dbExecutor = Executors.newSingleThreadExecutor()
     private val vessels = ConcurrentHashMap<String, Vessel>()
+    private val dirtyPersistence = ConcurrentHashMap.newKeySet<String>()
+
     private val _lifeboats = MutableStateFlow<List<Vessel>>(emptyList())
     val lifeboats: StateFlow<List<Vessel>> = _lifeboats.asStateFlow()
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var webSocket: WebSocket? = null
-    private var deferredConnectRunnable: Runnable? = null
+    private var resubscribeRunnable: Runnable? = null
 
-    /** Prevents two concurrent reconnect chains after a rapid close+fail. */
     private val reconnecting = AtomicBoolean(false)
     private var reconnectAttempt = 0
     private var connectGeneration = 0
 
-    /** Pending emission flag + timestamps for throttling list publishes. */
     @Volatile
     private var emissionPending = false
     @Volatile
     private var lastEmitMs = 0L
+    @Volatile
+    private var lastSubscriptionSentMs = 0L
 
-    /**
-     * True only while a socket has completed the handshake (onOpen). A socket
-     * that is merely *assigned* to [webSocket] but still opening must not be
-     * torn down by a viewport change — it will subscribe with the current box
-     * in resubscribeMessage anyway, and closing it mid-handshake adds a dead
-     * reconnect to startup.
-     */
     @Volatile
     private var liveSocketOpen = false
 
-    /** Breadcrumb trails for each vessel's course history. */
     private val trailRecorder = VesselTrailRecorder()
 
-    /**
-     * Viewport-driven subscription: [setViewport] stores the visible bounds
-     * (clamped/capped by [clampedViewportBox]) and re-subscribes the live
-     * socket; a fresh connect picks the same bounds up in [resubscribeMessage].
-     */
     @Volatile
     private var viewportBox: List<Double>? = null
 
@@ -96,10 +68,14 @@ class AisRepository(
     }
 
     /**
-     * Pre-populates the in-memory vessel cache from the persistent SQLite store
-     * and static registry so returning lifeboats are recognized instantly on startup.
+     * Immediately populates the in-memory vessel cache with seeded station lifeboats
+     * and overrides them with persisted SQLite records so lifeboats appear at 0ms on startup.
      */
     private fun preloadLifeboats() {
+        val now = System.currentTimeMillis()
+        for ((mmsi, seeded) in KnownLifeboats.seededStationVessels(now)) {
+            vessels[mmsi] = seeded
+        }
         val stored = lifeboatStore?.loadAllLifeboats().orEmpty()
         for ((mmsi, vessel) in stored) {
             vessels[mmsi] = vessel
@@ -109,105 +85,111 @@ class AisRepository(
         }
     }
 
-    /**
-     * Starts the AIS connection. Defers startup connection briefly so if an
-     * initial map viewport arrives right after launch, it connects once with
-     * the actual camera bounds without a double-connect race.
-     */
+    /** Connects immediately to the AIS stream. */
     fun start() {
-        if (webSocket != null || deferredConnectRunnable != null) return
-        val runnable = Runnable {
-            deferredConnectRunnable = null
-            if (webSocket == null) {
-                connect()
-            }
+        if (webSocket != null) return
+        if (com.example.plane_tracker.BuildConfig.AIS_STREAM_API_KEY.isBlank()) {
+            Log.w(TAG, "AIS_STREAM_API_KEY is blank in local.properties; showing seeded/cached lifeboats only.")
+            return
         }
-        deferredConnectRunnable = runnable
-        mainHandler.postDelayed(runnable, DEFER_CONNECT_MS)
+        connect()
     }
 
     /**
-     * Narrows the stream to the visible map area. Safe to call on every
-     * camera idle; re-subscribes only when the camera moves outside the current box.
+     * Expands subscription coverage if the user pans outside the default UK/Europe boxes.
+     * Never closes a live WebSocket — updates the subscription in-place (rate-limited to
+     * respect aisstream.io's 1 update/sec limit).
      */
     fun setViewport(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double) {
-        // Cancel any pending deferred startup connect — we have the real viewport now.
-        deferredConnectRunnable?.let {
-            mainHandler.removeCallbacks(it)
-            deferredConnectRunnable = null
+        if (webSocket == null) {
+            start()
         }
 
-        // If the new camera viewport is already fully inside our active subscription box,
-        // do NOT close or reconnect the websocket.
+        // If the camera is already inside our always-on UK/Europe default boxes
+        // or the active custom viewport box, no subscription update is needed.
+        if (isViewportInDefaultBoxes(minLat, minLon, maxLat, maxLon)) {
+            if (viewportBox == null) return
+            viewportBox = null
+            scheduleInPlaceResubscribe()
+            return
+        }
+
         val currentBox = viewportBox
         if (liveSocketOpen && isViewportContained(minLat, minLon, maxLat, maxLon, currentBox)) {
             return
         }
 
         val box = clampedViewportBox(minLat, minLon, maxLat, maxLon)
-        val socketOpen: Boolean
         synchronized(this) {
-            if (box == viewportBox && webSocket != null) return
+            if (box == viewportBox) return
             viewportBox = box
-            socketOpen = liveSocketOpen
         }
 
-        if (socketOpen) {
-            webSocket?.close(1000, "Viewport changed")
-            webSocket = null
-            connect()
-        } else if (webSocket == null) {
-            connect()
-        }
+        scheduleInPlaceResubscribe()
     }
 
-    /** Falls back to the home-waters default (e.g. when the camera is unknown). */
+    /** Falls back to the home-waters default without tearing down the live socket. */
     fun clearViewport() {
-        deferredConnectRunnable?.let {
-            mainHandler.removeCallbacks(it)
-            deferredConnectRunnable = null
-        }
-        val socketOpen: Boolean
         synchronized(this) {
             if (viewportBox == null) return
             viewportBox = null
-            socketOpen = liveSocketOpen
         }
-        if (socketOpen) {
-            webSocket?.close(1000, "Viewport cleared")
-            webSocket = null
-            connect()
+        scheduleInPlaceResubscribe()
+    }
+
+    /**
+     * Sends an updated subscription message over the existing open WebSocket,
+     * throttled to at least 1.5s between sends so aisstream.io never drops us.
+     */
+    private fun scheduleInPlaceResubscribe() {
+        if (!liveSocketOpen) return
+        resubscribeRunnable?.let { mainHandler.removeCallbacks(it) }
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastSubscriptionSentMs
+        val delayMs = (MIN_RESUBSCRIBE_INTERVAL_MS - elapsed).coerceAtLeast(0L)
+        val runnable = Runnable {
+            resubscribeRunnable = null
+            val ws = webSocket
+            if (liveSocketOpen && ws != null) {
+                lastSubscriptionSentMs = System.currentTimeMillis()
+                ws.send(resubscribeMessage().toString())
+            }
+        }
+        resubscribeRunnable = runnable
+        if (delayMs == 0L) {
+            mainHandler.post(runnable)
+        } else {
+            mainHandler.postDelayed(runnable, delayMs)
         }
     }
 
-    /** Home waters: the audience and rescue services (RNLI, KNRM, DGzRS, SSRS,
-     *  Redningsselskapet) all live here; worldwide boxes pulled in the Med and
-     *  US coasts — thousands of irrelevant messages a minute. */
-    private fun defaultBoxes(): JSONArray = JSONArray().apply {
-        // UK, Ireland, North Sea & NW Europe
+    /**
+     * Home waters (UK, Ireland, North Sea, NW Europe & Baltic) are always included
+     * so moored RNLI/European lifeboats are never missed while panning locally.
+     */
+    private fun subscriptionBoxes(): JSONArray = JSONArray().apply {
+        // Box 1: UK, Ireland, North Sea & NW Europe
         put(JSONArray().apply {
             put(JSONArray().apply { put(48.0); put(-12.0) })
             put(JSONArray().apply { put(62.0); put(12.0) })
         })
-        // Nordic / Baltic Sea
+        // Box 2: Nordic / Baltic Sea
         put(JSONArray().apply {
             put(JSONArray().apply { put(54.0); put(4.0) })
             put(JSONArray().apply { put(71.0); put(31.0) })
         })
+        // Extra viewport box when the user pans outside Europe
+        viewportBox?.let { box ->
+            put(JSONArray().apply {
+                put(JSONArray().apply { put(box[0]); put(box[1]) })
+                put(JSONArray().apply { put(box[2]); put(box[3]) })
+            })
+        }
     }
 
-    /** The subscription JSON sent on open and on every viewport change. */
     private fun resubscribeMessage(): JSONObject = JSONObject().apply {
         put("APIKey", com.example.plane_tracker.BuildConfig.AIS_STREAM_API_KEY)
-        put("BoundingBoxes", viewportBox?.let { box ->
-            JSONArray().apply {
-                put(JSONArray().apply {
-                    // aisstream wants [[latFrom, lonFrom], [latTo, lonTo]]
-                    put(JSONArray().apply { put(box[0]); put(box[1]) })
-                    put(JSONArray().apply { put(box[2]); put(box[3]) })
-                })
-            }
-        } ?: defaultBoxes())
+        put("BoundingBoxes", subscriptionBoxes())
         put("FilterMessageTypes", JSONArray().apply {
             put("PositionReport")
             put("StandardClassBPositionReport")
@@ -218,6 +200,7 @@ class AisRepository(
     }
 
     private fun connect() {
+        if (com.example.plane_tracker.BuildConfig.AIS_STREAM_API_KEY.isBlank()) return
         connectGeneration++
         liveSocketOpen = false
         val request = Request.Builder().url(STREAM_URL).build()
@@ -227,6 +210,7 @@ class AisRepository(
                 Log.i(TAG, "AIS stream connected")
                 reconnectAttempt = 0
                 liveSocketOpen = generation == connectGeneration
+                lastSubscriptionSentMs = System.currentTimeMillis()
                 webSocket.send(resubscribeMessage().toString())
             }
 
@@ -257,7 +241,7 @@ class AisRepository(
     private fun handleMessage(text: String) {
         val msg = JSONObject(text)
         val meta = msg.optJSONObject("MetaData") ?: return
-        val mmsi = meta.optString("MMSI")
+        val mmsi = meta.optString("MMSI").trim()
         if (mmsi.isBlank()) return
 
         var isNewVessel = false
@@ -266,47 +250,56 @@ class AisRepository(
             Vessel(mmsi = mmsi)
         }
 
-        // Fast-path: Check static known registry or pre-populated state for instant classification.
-        if (isNewVessel && !vessel.isLifeboat) {
-            val knownInfo = KnownLifeboats.getKnownDetails(mmsi)
-            if (knownInfo != null) {
-                vessel.isLifeboat = true
-                if (vessel.name.isBlank()) vessel.name = knownInfo.name
-                if (vessel.callSign.isBlank()) vessel.callSign = knownInfo.callSign
-                if (vessel.shipType == 0) vessel.shipType = knownInfo.shipType
-                vessel.lifeboatCheckDirty = false
-                lifeboatStore?.saveVessel(vessel)
-            }
-        }
-
         var updated = false
 
+        // 1. Read MetaData ShipName first so real broadcast names replace generic prefix placeholders
         val metaShipName = meta.optString("ShipName", "").trim()
-        if (metaShipName.isNotEmpty() && vessel.name.isBlank()) {
+        if (metaShipName.isNotEmpty() && (vessel.name.isBlank() || isPlaceholderName(vessel.name))) {
             vessel.name = metaShipName
             vessel.lifeboatCheckDirty = true
         }
 
+        // 2. Fast-path known MMSI lookup
+        if (isNewVessel || !vessel.isLifeboat) {
+            val knownInfo = KnownLifeboats.getKnownDetails(mmsi)
+            if (knownInfo != null) {
+                val isExact = KnownLifeboats.isExactKnownLifeboat(mmsi)
+                val excluded = EXCLUSIONS_REGEX.containsMatchIn(vessel.name) && !LIFEBOAT_REGEX.containsMatchIn(vessel.name)
+                if (isExact || !excluded) {
+                    vessel.isLifeboat = true
+                    if (vessel.name.isBlank()) vessel.name = knownInfo.name
+                    if (vessel.callSign.isBlank()) vessel.callSign = knownInfo.callSign
+                    if (vessel.shipType == 0) vessel.shipType = knownInfo.shipType
+                    if (!isValidCoord(vessel.latitude, vessel.longitude) &&
+                        isValidCoord(knownInfo.defaultLat, knownInfo.defaultLon)
+                    ) {
+                        vessel.latitude = knownInfo.defaultLat
+                        vessel.longitude = knownInfo.defaultLon
+                    }
+                    vessel.lifeboatCheckDirty = false
+                    updated = true
+                }
+            }
+        }
+
+        // 3. Apply MetaData coordinates (filtering out 0.0, NaN, and AIS 91/181 sentinels)
         val metaLat = meta.optDouble("latitude", meta.optDouble("Latitude", Double.NaN))
         val metaLon = meta.optDouble("longitude", meta.optDouble("Longitude", Double.NaN))
-        if (!metaLat.isNaN() && !metaLon.isNaN() && metaLat != 0.0 && metaLon != 0.0) {
+        if (isValidCoord(metaLat, metaLon)) {
             vessel.latitude = metaLat
             vessel.longitude = metaLon
             vessel.lastSeen = System.currentTimeMillis()
             updated = true
-            if (vessel.isLifeboat) {
-                trailRecorder.record(mmsi, metaLat, metaLon, vessel.lastSeen)
-            }
         }
 
+        // 4. Parse typed AIS message payload
         if (msg.has("Message")) {
             val messageNode = msg.getJSONObject("Message")
             when {
                 messageNode.has("PositionReport") -> {
                     val pr = messageNode.getJSONObject("PositionReport")
                     updated = applyPosition(vessel, pr) || updated
-                    vessel.speedKnots = pr.optDouble("Sog", vessel.speedKnots)
-                    vessel.heading = pr.optDouble("Cog", vessel.heading)
+                    applyKinematics(vessel, pr)
                     if (pr.has("NavigationalStatus")) {
                         vessel.navStatus = pr.optInt("NavigationalStatus", vessel.navStatus)
                     }
@@ -314,14 +307,12 @@ class AisRepository(
                 messageNode.has("StandardClassBPositionReport") -> {
                     val pr = messageNode.getJSONObject("StandardClassBPositionReport")
                     updated = applyPosition(vessel, pr) || updated
-                    vessel.speedKnots = pr.optDouble("Sog", vessel.speedKnots)
-                    vessel.heading = pr.optDouble("Cog", vessel.heading)
+                    applyKinematics(vessel, pr)
                 }
                 messageNode.has("ExtendedClassBPositionReport") -> {
                     val pr = messageNode.getJSONObject("ExtendedClassBPositionReport")
                     updated = applyPosition(vessel, pr) || updated
-                    vessel.speedKnots = pr.optDouble("Sog", vessel.speedKnots)
-                    vessel.heading = pr.optDouble("Cog", vessel.heading)
+                    applyKinematics(vessel, pr)
                     val name = pr.optString("Name", "").trim()
                     if (name.isNotEmpty() && name != vessel.name) {
                         vessel.name = name
@@ -342,7 +333,10 @@ class AisRepository(
                         vessel.lifeboatCheckDirty = true
                     }
                     val cs = ssd.optString("CallSign", "").trim()
-                    if (cs.isNotEmpty()) vessel.callSign = cs
+                    if (cs.isNotEmpty() && cs != vessel.callSign) {
+                        vessel.callSign = cs
+                        vessel.lifeboatCheckDirty = true
+                    }
                     val dest = ssd.optString("Destination", "").trim()
                     if (dest.isNotEmpty()) vessel.destination = dest
                     val type = ssd.optInt("Type", 0)
@@ -351,7 +345,7 @@ class AisRepository(
                         vessel.lifeboatCheckDirty = true
                     }
                     val draught = ssd.optDouble("MaximumStaticDraught", 0.0)
-                    if (draught > 0.0) vessel.draught = draught
+                    if (!draught.isNaN() && draught > 0.0) vessel.draught = draught
                     applyDimension(vessel, ssd.optJSONObject("Dimension"))
                     val imo = ssd.optInt("ImoNumber", 0)
                     if (imo > 0) vessel.imoNumber = imo
@@ -367,11 +361,19 @@ class AisRepository(
                             vessel.lifeboatCheckDirty = true
                         }
                         val cs = ra.optString("CallSign", "").trim()
-                        if (cs.isNotEmpty()) vessel.callSign = cs
+                        if (cs.isNotEmpty() && cs != vessel.callSign) {
+                            vessel.callSign = cs
+                            vessel.lifeboatCheckDirty = true
+                        }
                         updated = true
                     }
                     if (sdr.has("ReportB")) {
                         val rb = sdr.getJSONObject("ReportB")
+                        val csB = rb.optString("CallSign", "").trim()
+                        if (csB.isNotEmpty() && csB != vessel.callSign) {
+                            vessel.callSign = csB
+                            vessel.lifeboatCheckDirty = true
+                        }
                         val type = rb.optInt("ShipType", 0)
                         if (type > 0 && type != vessel.shipType) {
                             vessel.shipType = type
@@ -384,31 +386,66 @@ class AisRepository(
             }
         }
 
-        // Refresh the cached lifeboat verdict only when classification inputs
-        // changed — the regex is too hot to run on every position report.
+        // 5. Evaluate lifeboat classification without un-classifying confirmed SAR vessels
         if (vessel.lifeboatCheckDirty) {
-            vessel.isLifeboat = checkIsLifeboat(vessel.name, vessel.callSign, vessel.shipType)
+            val classified = checkIsLifeboat(vessel.name, vessel.callSign, vessel.shipType)
+            val keepPrevious = vessel.isLifeboat &&
+                (KnownLifeboats.isExactKnownLifeboat(mmsi) || vessel.shipType == 51 || !EXCLUSIONS_REGEX.containsMatchIn(vessel.name))
+            vessel.isLifeboat = classified || keepPrevious
             vessel.lifeboatCheckDirty = false
             if (vessel.isLifeboat) {
                 updated = true
-                lifeboatStore?.saveVessel(vessel)
             }
         }
 
+        if (vessel.isLifeboat && isValidCoord(vessel.latitude, vessel.longitude)) {
+            trailRecorder.record(mmsi, vessel.latitude, vessel.longitude, vessel.lastSeen)
+        }
+
         if (updated && vessel.isLifeboat) {
+            dirtyPersistence.add(mmsi)
             requestEmission()
         }
     }
 
+    private fun isPlaceholderName(name: String): Boolean =
+        name.startsWith("RNLI Lifeboat ") ||
+            name.startsWith("KNRM Reddingboot ") ||
+            name.startsWith("Sjöräddning Rescue ") ||
+            name.startsWith("AIS-SART Beacon ") ||
+            name.startsWith("Lifeboat ")
+
+    private fun isValidCoord(lat: Double, lon: Double): Boolean =
+        !lat.isNaN() && !lon.isNaN() &&
+            lat in -90.0..90.0 && lon in -180.0..180.0 &&
+            !(lat == 0.0 && lon == 0.0)
+
     private fun applyPosition(vessel: Vessel, pr: JSONObject): Boolean {
-        val lat = pr.optDouble("Latitude", vessel.latitude)
-        val lon = pr.optDouble("Longitude", vessel.longitude)
-        if (lat != 0.0 && lon != 0.0) {
+        val lat = pr.optDouble("Latitude", Double.NaN)
+        val lon = pr.optDouble("Longitude", Double.NaN)
+        if (isValidCoord(lat, lon)) {
             vessel.latitude = lat
             vessel.longitude = lon
+            vessel.lastSeen = System.currentTimeMillis()
+            return true
         }
-        vessel.lastSeen = System.currentTimeMillis()
-        return true
+        return false
+    }
+
+    private fun applyKinematics(vessel: Vessel, pr: JSONObject) {
+        val sog = pr.optDouble("Sog", Double.NaN)
+        if (!sog.isNaN() && sog in 0.0..102.2) {
+            vessel.speedKnots = sog
+        }
+        val cog = pr.optDouble("Cog", Double.NaN)
+        if (!cog.isNaN() && cog in 0.0..359.9) {
+            vessel.heading = cog
+        } else {
+            val hdg = pr.optDouble("TrueHeading", Double.NaN)
+            if (!hdg.isNaN() && hdg in 0.0..359.9) {
+                vessel.heading = hdg
+            }
+        }
     }
 
     private fun applyDimension(vessel: Vessel, dim: JSONObject?) {
@@ -421,11 +458,6 @@ class AisRepository(
         if (c + d > 0) vessel.widthMeters = c + d
     }
 
-    /**
-     * Coalesces lifeboat-list publishes to at most one per [EMIT_INTERVAL_MS].
-     * A follow-up emission is scheduled immediately if messages arrive while
-     * the throttle window is closed, so the UI never shows stale data for long.
-     */
     private fun requestEmission() {
         if (emissionPending) return
         val now = System.currentTimeMillis()
@@ -443,9 +475,8 @@ class AisRepository(
         }
     }
 
-    /** Reconnects with exponential backoff (5s → 10s → 20s → … capped at 5 min). */
     private fun scheduleReconnect(failedGeneration: Int) {
-        if (failedGeneration != connectGeneration) return // a newer socket owns the state
+        if (failedGeneration != connectGeneration) return
         if (!reconnecting.compareAndSet(false, true)) return
         val delayMs = RECONNECT_BASE_MS * (1L shl reconnectAttempt.coerceAtMost(5))
         reconnectAttempt++
@@ -460,46 +491,73 @@ class AisRepository(
 
     private fun checkIsLifeboat(name: String, callSign: String = "", type: Int = 0): Boolean {
         val text = "$name $callSign".trim()
-        if (EXCLUSIONS_REGEX.containsMatchIn(text)) {
-            return false
-        }
         if (LIFEBOAT_REGEX.containsMatchIn(text)) {
             return true
+        }
+        if (EXCLUSIONS_REGEX.containsMatchIn(text)) {
+            return false
         }
         return type == 51
     }
 
     fun stop() {
         connectGeneration++
-        deferredConnectRunnable?.let {
+        resubscribeRunnable?.let {
             mainHandler.removeCallbacks(it)
-            deferredConnectRunnable = null
+            resubscribeRunnable = null
         }
         webSocket?.close(1000, "User requested")
         webSocket = null
+        liveSocketOpen = false
         mainHandler.removeCallbacksAndMessages(null)
     }
 
-    /** Bounded course trail for a vessel, oldest first (empty when unknown). */
     fun vesselTrail(mmsi: String): List<VesselTrailPoint> = trailRecorder.trailFor(mmsi)
 
     private fun emitLifeboats() {
         val now = System.currentTimeMillis()
-        // Cleanup older than 30 minutes — piggybacks on the throttled emit
-        // instead of scanning every message.
-        vessels.entries.removeIf { now - it.value.lastSeen > STALE_MS }
+        // Only evict non-lifeboat commercial vessels from memory so discovered lifeboats
+        // and their station coordinates remain visible across 3-6 minute AIS intervals.
+        vessels.entries.removeIf { !it.value.isLifeboat && now - it.value.lastSeen > STALE_NON_LIFEBOAT_MS }
         trailRecorder.retainAll(vessels.keys)
-        _lifeboats.value = vessels.values
-            .filter { it.isLifeboat && it.latitude != 0.0 && it.longitude != 0.0 }
+
+        val currentLifeboats = vessels.values
+            .filter { it.isLifeboat && isValidCoord(it.latitude, it.longitude) }
             .map { it.copy() }
+            .sortedBy { it.name.ifBlank { it.mmsi } }
             .toList()
+
+        _lifeboats.value = currentLifeboats
+
+        // Persist dirty lifeboats asynchronously off the WebSocket / UI threads
+        if (lifeboatStore != null && dirtyPersistence.isNotEmpty()) {
+            val toSave = dirtyPersistence.toList().mapNotNull { vessels[it]?.copy() }
+            dirtyPersistence.clear()
+            if (toSave.isNotEmpty()) {
+                dbExecutor.execute {
+                    lifeboatStore.saveAll(toSave)
+                }
+            }
+        }
     }
 
     companion object {
         private const val TAG = "AisRepository"
         private const val STREAM_URL = "wss://stream.aisstream.io/v0/stream"
-        private const val DEFER_CONNECT_MS = 300L
         private const val VIEWPORT_PAD_DEG = 1.0
+        private const val MIN_RESUBSCRIBE_INTERVAL_MS = 1_500L
+
+        private val DEFAULT_BOX_UK_EUROPE = listOf(48.0, -12.0, 62.0, 12.0)
+        private val DEFAULT_BOX_NORDIC = listOf(54.0, 4.0, 71.0, 31.0)
+
+        fun isViewportInDefaultBoxes(
+            minLat: Double,
+            minLon: Double,
+            maxLat: Double,
+            maxLon: Double
+        ): Boolean =
+            isViewportContained(minLat, minLon, maxLat, maxLon, DEFAULT_BOX_UK_EUROPE) ||
+                isViewportContained(minLat, minLon, maxLat, maxLon, DEFAULT_BOX_NORDIC)
 
         /**
          * Checks if the camera viewport [minLat, minLon, maxLat, maxLon] is fully
@@ -523,7 +581,6 @@ class AisRepository(
             return if (lonTo >= lonFrom) {
                 minLon >= lonFrom && maxLon <= lonTo
             } else {
-                // Antimeridian crossing
                 (minLon >= lonFrom || minLon <= lonTo) && (maxLon >= lonFrom || maxLon <= lonTo)
             }
         }
@@ -564,31 +621,28 @@ class AisRepository(
             )
         }
 
-        /**
-         * Rounds to the nearest whole degree; exact halves go down. The tiny
-         * epsilon makes exact .5 midpoints consistently round down.
-         */
         private fun roundHalfDown(v: Double): Double =
             floor(v + 0.5 - 1e-9)
 
         private fun wrapLonStatic(lon: Double): Double =
             ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+
         private const val EMIT_INTERVAL_MS = 500L
         private const val PING_INTERVAL_S = 30L
-        private const val STALE_MS = 30 * 60 * 1000L
+        private const val STALE_NON_LIFEBOAT_MS = 10 * 60 * 1000L
         private const val RECONNECT_BASE_MS = 5_000L
-        /** Cap on a viewport subscription box per axis, in degrees. */
         const val MAX_BOX_SPAN_DEG = 50.0
 
         private val LIFEBOAT_REGEX = Regex(
-            "royal national lifeboat|rnli|rnli\\d*|life ?boat|reddingboot|reddingsboot|knrm|dgzrs|seenotrett.*|seenotkreuzer|seenotretter|" +
-                "snsm|redningsselskapet|redningsskøyte|sjöräddningssällskapet|\\bssrs\\b|\\bnsri\\b|rcmsar|marine rescue|volunteer marine rescue|sea rescue|" +
+            "royal national lifeboat|\\brnli\\b|rnli\\d*|\\brnlb\\b|life ?boat|reddingboot|reddingsboot|knrm|dgzrs|seenotrett.*|seenotkreuzer|seenotretter|" +
+                "snsm|sauvetage en mer|redningsselskapet|redningsskøyte|redningsskoyte|\\brs\\s*\\d{2,3}\\b|sjöräddning.*|\\bssrs\\b|\\bnsri\\b|rcmsar|" +
+                "marine rescue|volunteer marine rescue|sea rescue|inshore rescue|humber rescue|search and rescue|search & rescue|\\bsar\\b|" +
                 "^rescue\\s+[a-z0-9]|^\\d+\\s*lifeboat",
             RegexOption.IGNORE_CASE
         )
 
         private val EXCLUSIONS_REGEX = Regex(
-            "\\bpatrol\\b|coastguard|coast guard|\\btug\\b|supply|cargo|tanker|container|ferry|\\bpilot\\b|\\bpolice\\b|navy|warship|yacht|barge|workboat|dredger",
+            "\\btug\\b|supply|cargo|tanker|container|ferry|\\bpilot\\b|navy|warship|yacht|barge|workboat|dredger|fishing|trawler",
             RegexOption.IGNORE_CASE
         )
     }

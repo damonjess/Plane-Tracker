@@ -25,7 +25,10 @@ android {
         if (localPropertiesFile.exists()) {
             localPropertiesFile.inputStream().use { stream -> localProperties.load(stream) }
         }
-        val aisApiKey = localProperties.getProperty("AIS_STREAM_API_KEY") ?: ""
+        val rawAisKey = localProperties.getProperty("AIS_STREAM_API_KEY")
+            ?: System.getenv("AIS_STREAM_API_KEY")
+            ?: ""
+        val aisApiKey = rawAisKey.trim().removeSurrounding("\"").removeSurrounding("'")
         buildConfigField("String", "AIS_STREAM_API_KEY", "\"$aisApiKey\"")
     }
 
