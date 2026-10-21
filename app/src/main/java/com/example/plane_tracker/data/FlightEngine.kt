@@ -82,14 +82,20 @@ class FlightEngine {
     /** Effective interpolated state for an aircraft at [now]. */
     fun interpolate(ac: Aircraft, now: Long): Aircraft {
         val elapsedMs = now - ac.lastSeen
-        if (ac.onGround || ac.velocityMps < 1.0 || elapsedMs <= 0 ||
-            elapsedMs > maxExtrapolationMs
-        ) return ac
+        if (ac.onGround || elapsedMs <= 0 || elapsedMs > maxExtrapolationMs) return ac
+
+        val elapsedSec = elapsedMs / 1000.0
+        val interpolatedAlt = maxOf(0.0, ac.altitudeMeters + ac.verticalRateMps * elapsedSec)
+
+        if (ac.velocityMps < 1.0) {
+            return ac.copy(altitudeMeters = interpolatedAlt)
+        }
+
         val (lon, lat) = GeoMath.deadReckon(
             ac.longitude, ac.latitude, ac.heading.toDouble(),
-            ac.velocityMps, elapsedMs / 1000.0
+            ac.velocityMps, elapsedSec
         )
-        return ac.copy(longitude = lon, latitude = lat)
+        return ac.copy(longitude = lon, latitude = lat, altitudeMeters = interpolatedAlt)
     }
 
     @Synchronized
